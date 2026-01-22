@@ -21,5 +21,6 @@ WORKDIR /workspace
 
 EXPOSE 8888
 
-CMD ["jupyter", "lab", "--port=8888",  "--allow-root"]
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
+
 

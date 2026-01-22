@@ -11,11 +11,14 @@ RUN apt-get update && apt-get install -y \
 RUN pip install --upgrade pip setuptools wheel
 
 RUN pip install \
-    jupyterlab 
-#    ir-datasets \
-#    ranx \
-#    opensearch-py \
-#    tqdm
+    jupyterlab \
+    ir-datasets \
+    ranx \
+    opensearch-py \
+    tqdm \
+    sentence-transformers \
+    openai
+
 
 WORKDIR /workspace
 

@@ -11,14 +11,15 @@ RUN apt-get update && apt-get install -y \
 RUN pip install --upgrade pip setuptools wheel
 
 RUN pip install \
-    jupyterlab \
-    ir-datasets \
-    ranx \
-    opensearch-py \
-    tqdm
+    jupyterlab 
+#    ir-datasets \
+#    ranx \
+#    opensearch-py \
+#    tqdm
 
 WORKDIR /workspace
 
 EXPOSE 8888
 
-CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
+CMD ["jupyter", "lab", "--port=8888",  "--allow-root"]
+

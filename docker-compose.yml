@@ -2,8 +2,9 @@ version: "3.9"
 
 services:
   jupyter:
+    build: .
     image: run-jupyter-image 
-    container_name: run-jupyter-image 
+    container_name: run-jupyter-container 
     ports:
       - "8888:8888"
     volumes:

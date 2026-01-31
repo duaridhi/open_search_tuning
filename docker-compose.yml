@@ -1,20 +1,19 @@
-version: "3.9"
-
-services:
-  jupyter:
-    build: .
-    image: run-jupyter-image 
-    container_name: run-jupyter-container 
-    ports:
-      - "8888:8888"
-    volumes:
-      - ./notebooks:/workspace
-    command: >
-      jupyter lab
-      --ip=0.0.0.0
-      --port=8888
-      --no-browser
-      --allow-root
-      --ServerApp.token=''
-      --ServerApp.password=''
-    restart: unless-stopped
+  services:
+    jupyter:
+      build: .
+      image: run-jupyter-image
+      container_name: run-jupyter-container
+      ports:
+        - "8888:8888"
+        - "5678:5678"   # debug port for debugpy / IntelliJ remote debugger
+      volumes:
+        - ./:/workspace:rw
+      working_dir: /workspace
+      environment:
+        - PYTHONUNBUFFERED=1
+      command: >
+        bash -lc "python -m debugpy --listen 0.0.0.0:5678 --wait-for-client & \
+        jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --ServerApp.token='' --ServerApp.password=''"
+      stdin_open: true
+      tty: true
+      restart: unless-stopped

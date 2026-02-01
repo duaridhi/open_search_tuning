@@ -6,8 +6,6 @@
       ports:
         - "8888:8888"
         - "5678:5678"   # debug port for debugpy / IntelliJ remote debugger
-      volumes:
-        - ./:/workspace:rw
       working_dir: /workspace
       environment:
         - PYTHONUNBUFFERED=1

@@ -1,76 +1,55 @@
-# %%
-print('Start')
+# filepath: /cuad_opensearch/cuad_opensearch/notebooks/02_ingest_cuad_documents.py
 
-# %%
 import json
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from open_search_connect import connect
+import ir_datasets
+from sentence_transformers import SentenceTransformer
+from opensearchpy import helpers
+import time
+from tqdm import tqdm
 
 load_dotenv()
 
-IR_DATASET_NAME = "msmarco-passage/train/split200-train"
-INDEX_NAME = "ir-dataset-train-v2"
+# Define constants
+CUAD_DATASET_NAME = "theatticusproject/cuad-qa"
+INDEX_NAME = "cuad-dataset"
+CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "indexing_checkpoint.json"
 
-# Resolve checkpoint path relative to this file (works in script and notebook)
-try:
-    BASE_DIR = Path(__file__).resolve().parent
-except NameError:
-    BASE_DIR = Path.cwd()
-CHECKPOINT_PATH = BASE_DIR.parent / "indexing_checkpoint.json"
-
-print(f"Checkpoint path: {CHECKPOINT_PATH}")
-print(os.getcwd())
-
-# %%
-from open_search_connect import connect
+# Connect to OpenSearch
 client = connect()
-
+client.info()
 # Reduce OpenSearch memory pressure during bulk indexing
 client.indices.put_settings(
     index=INDEX_NAME,
     body={
         "index": {
-            "refresh_interval": "-1",        # disable refresh during indexing
-            "number_of_replicas": "0"        # no replicas needed during bulk load
+            "refresh_interval": "-1",
+            "number_of_replicas": "0"
         }
     }
 )
 
-# %%
-import ir_datasets
-dataset = ir_datasets.load(IR_DATASET_NAME)
+# Load CUAD dataset
+from datasets import load_dataset
+
+# Load the CUAD QA dataset
+dataset = load_dataset(CUAD_DATASET_NAME)
 client.count(index=INDEX_NAME)
 
-# %%
-from huggingface_hub import login
-hf_token = os.environ.get("HF_TOKEN")
-if hf_token:
-    login(token=hf_token)
-else:
-    print("Warning: HF_TOKEN not set, skipping Hugging Face login")
-
-from sentence_transformers import SentenceTransformer
-# device="cpu" avoids loading CUDA libs when GPU memory is also limited
+# Load embedding model
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
 
-# %%
-from opensearchpy import helpers
-import time
-from tqdm import tqdm
-
-# %%
-# CHECKPOINT FUNCTIONS
-
+# Checkpoint functions
 def load_checkpoint():
-    """Load the last checkpoint (last indexed doc_id and count)"""
     if CHECKPOINT_PATH.exists():
         with CHECKPOINT_PATH.open('r') as f:
             return json.load(f)
     return {"last_doc_id": None, "doc_count": 0}
 
 def save_checkpoint(last_doc_id, doc_count):
-    """Save checkpoint to file"""
     CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with CHECKPOINT_PATH.open('w') as f:
         json.dump({"last_doc_id": last_doc_id, "doc_count": doc_count}, f)
@@ -78,20 +57,10 @@ def save_checkpoint(last_doc_id, doc_count):
 checkpoint = load_checkpoint()
 last_indexed_doc_id = checkpoint["last_doc_id"]
 starting_doc_count = checkpoint["doc_count"]
-print(f"Loaded checkpoint: last_doc_id={last_indexed_doc_id}, doc_count={starting_doc_count}")
 
-# %%
-MAX_DOCS = 8841825
-
-# On 8GB RAM with OpenSearch running:
-# - OpenSearch JVM heap:        ~2GB
-# - OS + Python overhead:       ~1GB
-# - Embedding model (MiniLM):   ~90MB
-# - Encode batch (32 * ~512tok): small
-# - streaming_bulk buffer:       small if chunk_size kept low
-ENCODE_BATCH_SIZE = 32    # reduced from 64 — saves ~150MB peak RAM
-BULK_CHUNK_SIZE = 200     # reduced from 500 — less buffering in streaming_bulk
-
+MAX_DOCS = 15000  # Adjust based on CUAD dataset size
+ENCODE_BATCH_SIZE = 32
+BULK_CHUNK_SIZE = 200
 
 def index_docs_bulk():
     docs_iter = dataset.docs_iter()
@@ -106,15 +75,12 @@ def index_docs_bulk():
         if skip_mode:
             if doc.doc_id == last_indexed_doc_id:
                 skip_mode = False
-                print(f"Checkpoint found. Resuming after doc: {doc.doc_id}")
             continue
 
         batch.append(doc)
         texts.append(doc.text)
 
         if len(batch) >= ENCODE_BATCH_SIZE:
-            # normalize_embeddings=False saves a small compute step
-            # batch_size param controls internal SentenceTransformer batching
             embeddings = embedding_model.encode(
                 texts,
                 show_progress_bar=False,
@@ -122,7 +88,7 @@ def index_docs_bulk():
                 normalize_embeddings=False,
             )
 
-            for j, d in enumerate(batch):   # renamed inner var to avoid shadowing outer `doc`
+            for j, d in enumerate(batch):
                 yield {
                     "_index": INDEX_NAME,
                     "_id": d.doc_id,
@@ -132,10 +98,9 @@ def index_docs_bulk():
                         "text_vector": embeddings[j].tolist()
                     }
                 }
-            batch.clear()   # clear() reuses list object — avoids reallocation
+            batch.clear()
             texts.clear()
 
-    # Flush remaining
     if batch:
         embeddings = embedding_model.encode(
             texts,
@@ -154,21 +119,20 @@ def index_docs_bulk():
                 }
             }
 
-# %%
 start_time = time.time()
 doc_count = starting_doc_count
 error_count = 0
 last_doc_id = last_indexed_doc_id
 batch_counter = 0
 
-with tqdm(total=MAX_DOCS, desc="Indexing documents", initial=starting_doc_count) as pbar:
+with tqdm(total=MAX_DOCS, desc="Indexing CUAD documents", initial=starting_doc_count) as pbar:
     for success, info in helpers.streaming_bulk(
         client,
         index_docs_bulk(),
         chunk_size=BULK_CHUNK_SIZE,
-        max_chunk_bytes=5 * 1024 * 1024,   # cap payload at 5MB per request
+        max_chunk_bytes=5 * 1024 * 1024,
         request_timeout=120,
-        raise_on_error=False,              # don't abort on single doc failures
+        raise_on_error=False,
     ):
         if success:
             doc_count += 1
@@ -177,16 +141,12 @@ with tqdm(total=MAX_DOCS, desc="Indexing documents", initial=starting_doc_count)
 
             if batch_counter % 10000 == 0:
                 save_checkpoint(last_doc_id, doc_count)
-                print(f"\nCheckpoint saved at doc_count={doc_count}, last_doc_id={last_doc_id}")
         else:
             error_count += 1
-            print(f"\nIndexing error: {info}")
+
         pbar.update(1)
 
-end_time = time.time()
-
 save_checkpoint(last_doc_id, doc_count)
-print(f"\nFinal checkpoint saved at doc_count={doc_count}, last_doc_id={last_doc_id}")
 
 # FINALIZE — restore settings
 client.indices.put_settings(
@@ -196,9 +156,8 @@ client.indices.put_settings(
 client.indices.refresh(index=INDEX_NAME)
 
 # STATS
-elapsed = end_time - start_time
+elapsed = time.time() - start_time
 newly_indexed = doc_count - starting_doc_count
-rate = newly_indexed / elapsed if elapsed > 0 else 0
 count_in_index = client.count(index=INDEX_NAME)["count"]
 
 print("\n====== INGESTION COMPLETE ======")
@@ -206,7 +165,6 @@ print(f"Documents indexed in this run: {newly_indexed}")
 print(f"Total documents indexed:       {doc_count}")
 print(f"Errors:                        {error_count}")
 print(f"Elapsed time:                  {elapsed:.2f} seconds")
-print(f"Indexing rate:                 {rate:.2f} docs/sec")
 print(f"Docs in index:                 {count_in_index}")
 
 client.transport.close()

@@ -1,2 +1,6 @@
 /notebooks/.ipynb_checkpoints/
 /.idea/
+indexing_checkpoint.json
+notebooks/.env
+notebooks/test.ipynb
+notebooks/test.py

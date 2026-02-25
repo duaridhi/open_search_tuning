@@ -1,26 +1,70 @@
 # filepath: /cuad_opensearch/cuad_opensearch/notebooks/02_ingest_cuad_documents.py
 
+# %% Imports & environment setup
 import json
 import os
 from pathlib import Path
 from dotenv import load_dotenv
-from open_search_connect import connect
-import ir_datasets
+from opensearchpy import OpenSearch
 from sentence_transformers import SentenceTransformer
 from opensearchpy import helpers
 import time
 from tqdm import tqdm
 
+# NOTE: The HuggingFace SQuAD-format dataset (theatticusproject/cuad) has one row
+# per Q&A pair, resulting in ~41 duplicate contexts per contract. It is used for
+# evaluation in 04_evaluate_*.py. Ingestion uses the local CUAD_v1.json which has
+# exactly one {title, context} entry per contract (510 unique contracts).
+
 load_dotenv()
 
-# Define constants
-CUAD_DATASET_NAME = "theatticusproject/cuad-qa"
-INDEX_NAME = "cuad-dataset"
+# %% Minimal recursive character splitter (no external dependencies)
+def split_text_with_offsets(text: str, chunk_size: int, chunk_overlap: int) -> list:
+    """Split text into chunks of ~chunk_size chars with overlap.
+    Returns a list of dicts with keys: text, char_start, char_end.
+    Splits preferentially on paragraph -> newline -> space boundaries.
+    """
+    separators = ["\n\n", "\n", " ", ""]
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        chunk_text = text[start:end]
+        if end < len(text):
+            split_at = -1
+            for sep in separators:
+                idx = chunk_text.rfind(sep)
+                if idx > chunk_size // 2:
+                    split_at = idx + len(sep)
+                    break
+            if split_at > 0:
+                end = start + split_at
+                chunk_text = text[start:end]
+        chunks.append({"text": chunk_text, "char_start": start, "char_end": end})
+        next_start = end - chunk_overlap
+        if next_start <= start:
+            next_start = start + 1
+        start = next_start
+    return chunks
+
+# %% Constants & configuration
+CUAD_JSON_PATH = Path(__file__).resolve().parent.parent / "data" / "CUAD_v1.json"
+INDEX_NAME = "cuad_dataset"
 CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "indexing_checkpoint.json"
 
-# Connect to OpenSearch
+MAX_DOCS = 2  # Max source rows to process from the dataset
+ENCODE_BATCH_SIZE = 32
+BULK_CHUNK_SIZE = 200
+
+# LangChain text splitter settings
+CHUNK_SIZE = 500       # characters per chunk
+CHUNK_OVERLAP = 50    # overlap between consecutive chunks
+
+# %% Connect to OpenSearch
+from open_search_connect import connect
 client = connect()
 client.info()
+
 # Reduce OpenSearch memory pressure during bulk indexing
 client.indices.put_settings(
     index=INDEX_NAME,
@@ -32,17 +76,17 @@ client.indices.put_settings(
     }
 )
 
-# Load CUAD dataset
-from datasets import load_dataset
+# %% Load CUAD contracts from local JSON (one unique contract per entry)
+with open(CUAD_JSON_PATH) as f:
+    cuad_contracts = json.load(f)["data"]  # list of {title, paragraphs}
+print(f"Loaded {len(cuad_contracts)} unique contracts from {CUAD_JSON_PATH.name}")
 
-# Load the CUAD QA dataset
-dataset = load_dataset(CUAD_DATASET_NAME)
-client.count(index=INDEX_NAME)
-
-# Load embedding model
+# %% Load embedding model
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+print("Embedding model loaded.")
+print(f"Text splitter ready (chunk_size={CHUNK_SIZE}, overlap={CHUNK_OVERLAP}).")
 
-# Checkpoint functions
+# %% Checkpoint functions
 def load_checkpoint():
     if CHECKPOINT_PATH.exists():
         with CHECKPOINT_PATH.open('r') as f:
@@ -57,75 +101,89 @@ def save_checkpoint(last_doc_id, doc_count):
 checkpoint = load_checkpoint()
 last_indexed_doc_id = checkpoint["last_doc_id"]
 starting_doc_count = checkpoint["doc_count"]
+print(f"Resuming from doc_id={last_indexed_doc_id}, count={starting_doc_count}")
 
-MAX_DOCS = 15000  # Adjust based on CUAD dataset size
-ENCODE_BATCH_SIZE = 32
-BULK_CHUNK_SIZE = 200
+# %% Bulk indexing generator
+def iter_chunks():
+    """Yield flat chunk dicts for every row in the CUAD train split.
 
-def index_docs_bulk():
-    docs_iter = dataset.docs_iter()
-    batch = []
-    texts = []
-    skip_mode = last_indexed_doc_id is not None
-
-    for i, doc in enumerate(docs_iter):
+    Each dict contains:
+        id         – unique chunk id: "{row_id}-chunk-{n}"
+        title      – source contract filename
+        text       – chunk text only
+        char_start – start offset of this chunk within the original context
+        char_end   – end offset of this chunk within the original context
+    """
+    for i, doc in enumerate(cuad_contracts):
         if i >= MAX_DOCS:
             break
+        title = doc["title"]
+        # Each CUAD entry has exactly one paragraph containing the full contract text
+        context = doc["paragraphs"][0]["context"]
+        for chunk_idx, chunk in enumerate(split_text_with_offsets(context, CHUNK_SIZE, CHUNK_OVERLAP)):
+            yield {
+                "id": f"{title}-chunk-{chunk_idx}",
+                "title": title,
+                "text": chunk["text"],
+                "char_start": chunk["char_start"],
+                "char_end": chunk["char_end"],
+            }
 
-        if skip_mode:
-            if doc.doc_id == last_indexed_doc_id:
-                skip_mode = False
-            continue
 
-        batch.append(doc)
-        texts.append(doc.text)
+def index_docs_bulk():
+    """Batch-encode chunks and yield OpenSearch bulk actions."""
+    batch_docs: list = []
+    batch_texts: list = []
+    skip_mode = last_indexed_doc_id is not None
 
-        if len(batch) >= ENCODE_BATCH_SIZE:
-            embeddings = embedding_model.encode(
-                texts,
-                show_progress_bar=False,
-                batch_size=ENCODE_BATCH_SIZE,
-                normalize_embeddings=False,
-            )
-
-            for j, d in enumerate(batch):
-                yield {
-                    "_index": INDEX_NAME,
-                    "_id": d.doc_id,
-                    "_source": {
-                        "doc_id": d.doc_id,
-                        "text": d.text,
-                        "text_vector": embeddings[j].tolist()
-                    }
-                }
-            batch.clear()
-            texts.clear()
-
-    if batch:
+    def _flush(docs, texts):
         embeddings = embedding_model.encode(
             texts,
             show_progress_bar=False,
             batch_size=ENCODE_BATCH_SIZE,
             normalize_embeddings=False,
         )
-        for j, d in enumerate(batch):
+        for j, d in enumerate(docs):
             yield {
                 "_index": INDEX_NAME,
-                "_id": d.doc_id,
+                "_id": d["id"],
                 "_source": {
-                    "doc_id": d.doc_id,
-                    "text": d.text,
-                    "text_vector": embeddings[j].tolist()
-                }
+                    "title": d["title"],
+                    "text": d["text"],
+                    "char_start": d["char_start"],
+                    "char_end": d["char_end"],
+                    "embedding": embeddings[j].tolist(),
+                },
             }
 
+    for chunk in iter_chunks():
+        # Resume support: skip already-indexed chunks
+        if skip_mode:
+            if chunk["id"] == last_indexed_doc_id:
+                skip_mode = False
+            continue
+
+        batch_docs.append(chunk)
+        batch_texts.append(chunk["text"])
+
+        if len(batch_docs) >= ENCODE_BATCH_SIZE:
+            yield from _flush(batch_docs, batch_texts)
+            batch_docs.clear()
+            batch_texts.clear()
+
+    # Flush remaining chunks
+    if batch_docs:
+        yield from _flush(batch_docs, batch_texts)
+
+# %% Run bulk indexing
 start_time = time.time()
 doc_count = starting_doc_count
 error_count = 0
 last_doc_id = last_indexed_doc_id
 batch_counter = 0
 
-with tqdm(total=MAX_DOCS, desc="Indexing CUAD documents", initial=starting_doc_count) as pbar:
+# Total chunks is unknown upfront; pass None for an unbounded progress bar
+with tqdm(total=None, desc="Indexing CUAD chunks", initial=starting_doc_count, unit="chunk") as pbar:
     for success, info in helpers.streaming_bulk(
         client,
         index_docs_bulk(),
@@ -148,14 +206,14 @@ with tqdm(total=MAX_DOCS, desc="Indexing CUAD documents", initial=starting_doc_c
 
 save_checkpoint(last_doc_id, doc_count)
 
-# FINALIZE — restore settings
+# %% Finalize — restore index settings
 client.indices.put_settings(
     index=INDEX_NAME,
     body={"index": {"refresh_interval": "1s", "number_of_replicas": "0"}}
 )
 client.indices.refresh(index=INDEX_NAME)
 
-# STATS
+# %% Stats & summary
 elapsed = time.time() - start_time
 newly_indexed = doc_count - starting_doc_count
 count_in_index = client.count(index=INDEX_NAME)["count"]
@@ -168,3 +226,15 @@ print(f"Elapsed time:                  {elapsed:.2f} seconds")
 print(f"Docs in index:                 {count_in_index}")
 
 client.transport.close()
+# %%
+
+
+client.indices.put_settings(
+    index=INDEX_NAME,
+    body={
+        "index": {
+            "refresh_interval": "1s",   # default
+            "number_of_replicas": "1"   # default
+        }
+    }
+)

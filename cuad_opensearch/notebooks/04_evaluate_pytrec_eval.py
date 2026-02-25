@@ -14,18 +14,20 @@ Run dict is built by running hybrid search for every unique question.
 import os
 import sys
 import json
-import hashlib
 from pathlib import Path
 from dotenv import load_dotenv
 from tqdm import tqdm
 import pytrec_eval
-from datasets import load_dataset
 from sentence_transformers import SentenceTransformer
 
 # ── path setup so open_search_connect is importable ──────────────────────────
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 from cuad_opensearch.notebooks.open_search_connect import connect
+from cuad_dataset_utils import (
+    load_cuad_hf,
+    build_qrels_hf,
+)
 
 load_dotenv(HERE.parent / ".env")
 
@@ -39,48 +41,6 @@ METRICS       = {          # pytrec_eval metric strings
     "P_10",
     "recall_10",
 }
-
-
-# ── helpers ───────────────────────────────────────────────────────────────────
-
-def _question_to_qid(question: str) -> str:
-    """Stable 8-char slug for a question string."""
-    return hashlib.md5(question.strip().encode()).hexdigest()[:8]
-
-
-# ── ground-truth builder ──────────────────────────────────────────────────────
-
-def build_qrels(split: str = "test") -> tuple[dict, dict]:
-    """
-    Load CUAD from HuggingFace and build pytrec_eval qrels.
-
-    Returns
-    -------
-    qrels : {qid: {doc_id: relevance}}   relevance ∈ {0, 1}
-    qid_to_question : {qid: question_text}  — for running search later
-    """
-    print(f"Loading CUAD '{split}' split …")
-    dataset = load_dataset("theatticusproject/cuad-qa", split=split, trust_remote_code=True)
-
-    qrels: dict[str, dict[str, int]] = {}
-    qid_to_question: dict[str, str] = {}
-
-    for sample in dataset:
-        qid   = _question_to_qid(sample["question"])
-        doc_id = sample["id"]
-        relevant = len(sample["answers"]["text"]) > 0
-
-        qid_to_question[qid] = sample["question"]
-
-        if qid not in qrels:
-            qrels[qid] = {}
-
-        # pytrec_eval needs integer grades; include non-relevant as 0
-        qrels[qid][doc_id] = 1 if relevant else 0
-
-    print(f"  {len(qrels)} unique queries, "
-          f"{sum(len(v) for v in qrels.values())} (query, doc) pairs")
-    return qrels, qid_to_question
 
 
 # ── hybrid search ─────────────────────────────────────────────────────────────
@@ -190,8 +150,9 @@ def main():
     client          = connect()
     embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
 
-    # 1. Build ground truth
-    qrels, qid_to_question = build_qrels(split="test")
+    # 1. Build ground truth (via cuad_dataset_utils)
+    hf_dataset = load_cuad_hf(split="test")
+    qrels, qid_to_question = build_qrels_hf(hf_dataset)
 
     # 2. Run hybrid search for every query
     run = hybrid_search_run(client, embedding_model, qid_to_question, top_k=TOP_K)

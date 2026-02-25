@@ -32,18 +32,21 @@ index_settings = {
     },
     "mappings": {
         "properties": {
-            # Primary search field — the contract passage text
-            "context": {
+            # Chunk text — the primary search field
+            "text": {
                 "type": "text",
                 "analyzer": "english"
             },
-            # Stored for evaluation / display only — not searched
+            # Contract filename — stored for display / filtering
             "title": {
                 "type": "keyword"
             },
-            "answers": {
-                "type": "object",
-                "enabled": False   # stored as-is, not indexed
+            # Character offsets of this chunk within the original context
+            "char_start": {
+                "type": "integer"
+            },
+            "char_end": {
+                "type": "integer"
             },
             # all-MiniLM-L6-v2 produces 384-dim vectors
             "embedding": {

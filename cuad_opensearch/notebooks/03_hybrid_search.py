@@ -1,13 +1,16 @@
-from cuad_opensearch.notebooks.open_search_connect import connect
+import sys
+
+from open_search_connect import connect
 from sentence_transformers import SentenceTransformer
 from opensearchpy import Search
-import os
 import json
+from dotenv import load_dotenv
+
 
 # Load environment variables
 load_dotenv()
+INDEX_NAME = "cuad_dataset"
 
-INDEX_NAME = "cuad-dataset-index"
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
 
 # Connect to OpenSearch
@@ -36,15 +39,10 @@ def hybrid_search(query, top_k=10):
         index=INDEX_NAME,
         body={
             "query": {
-                "script_score": {
-                    "query": {
-                        "match_all": {}
-                    },
-                    "script": {
-                        "source": "cosineSimilarity(params.query_vector, 'text_vector') + 1.0",
-                        "params": {
-                            "query_vector": query_embedding.tolist()
-                        }
+                "knn": {
+                    "embedding": {
+                        "vector": query_embedding.tolist(),
+                        "k": top_k
                     }
                 }
             },
@@ -69,5 +67,5 @@ def hybrid_search(query, top_k=10):
 # Example usage
 if __name__ == "__main__":
     query = "What is the purpose of the CUAD dataset?"
-    results = hybrid_search(query)
+    results = hybrid_search(query, 20)
     print(json.dumps(results, indent=2))

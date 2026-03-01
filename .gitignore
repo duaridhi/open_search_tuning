@@ -5,4 +5,5 @@ notebooks/.env
 notebooks/test.ipynb
 notebooks/test.py
 cuad_opensearch/data/
-cuad_data
+cuad_data/
+s3_utils/cuad_data/

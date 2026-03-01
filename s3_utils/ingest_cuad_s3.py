@@ -17,20 +17,6 @@ REPO_ID = "theatticusproject/cuad"
 LOCAL_DIR = "./cuad_data"
 
 
-# %%
-# Helper Function: Case-insensitive PDF file finding
-def find_pdfs(path):
-    """
-    Find all PDF files in a directory, handling both .pdf and .PDF extensions.
-    
-    Parameters:
-        path (Path): Root directory to search
-    
-    Returns:
-        list: List of all PDF file paths (both .pdf and .PDF)
-    """
-    pdf_files = list(path.rglob("*.pdf")) + list(path.rglob("*.PDF"))
-    return pdf_files
 
 
 # %%
@@ -53,7 +39,7 @@ except Exception as e:
 # %%
 # Download CUAD Dataset from HuggingFace
 print("\n" + "=" * 60)
-print("DOWNLOADING CUAD DATASET FROM HUGGINGFACE")
+print("DOWNLOADING CUAD DATASET FROM HUGGINGFACE to ", LOCAL_DIR)
 print("=" * 60)
 
 try:
@@ -64,7 +50,7 @@ try:
         allow_patterns=["*.pdf", "*.PDF"],  # Handle both lowercase and uppercase
         max_workers=8
     )
-    print("✓ Dataset downloaded successfully")
+    print("✓ Dataset downloaded successfully to ", LOCAL_DIR)
     
 except Exception as e:
     print(f"✗ Failed to download dataset: {e}")
@@ -207,4 +193,11 @@ def get_file_from_minio(file_name, bucket_name):
     except Exception as e:
         print(f"✗ Error retrieving {file_name}: {e}")
         raise
+# %%
+minio_client.get_object(Bucket=BUCKET, Key="/full_contract_pdf/Part_I/Affiliate_Agreements/SteelVaultCorp_20081224_10-K_EX-10.16_3074935_EX-10.16_Affiliate Agreement.pdf")
+
+#file_exists_in_minio(bucket_name=BUCKET,file_name="cuad-contracts/raw/full_contract_pdf/Part_I/Affiliate_Agreements/SteelVaultCorp_20081224_10-K_EX-10.16_3074935_EX-10.16_Affiliate Agreement.pdf")
+#minio_client.list_objects_v2(Bucket=BUCKET, Prefix="raw/")
+
+
 # %%

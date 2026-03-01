@@ -1,22 +1,31 @@
 # %%
 # Imports and Setup
+import os
 import sys
 from pathlib import Path
 from huggingface_hub import snapshot_download
 
 # Add s3_utils directory to path for imports
-s3_utils_path = Path("/home/ridhi/projects/project1/open_search_tuning/s3_utils")
-if str(s3_utils_path) not in sys.path:
-    sys.path.insert(0, str(s3_utils_path))
+root_path = Path("/home/ridhi/projects/project1/open_search_tuning")
+# s3_utils_path = root_path/"sr_utils"
+# if str(s3_utils_path) not in sys.path:
+#     sys.path.append(0, str(s3_utils_path))
+if str(root_path) not in sys.path:
+    sys.path.insert(0, str(root_path))
 
 from connect_s3 import get_storage_client
+from cuad_opensearch.notebooks.cuad_download_utils import download_cuad_dataset, find_pdfs
+from cuad_opensearch.notebooks.cuad_download_utils import download_cuad_dataset
+
+
 
 # Configuration
 BUCKET = "cuad-contracts"
 REPO_ID = "theatticusproject/cuad"
-LOCAL_DIR = "./cuad_data"
+LOCAL_DIR = "./../cuad_opensearch/cuad_data"
 
-
+# %%
+print(os.path.abspath(LOCAL_DIR))
 
 
 # %%
@@ -35,38 +44,20 @@ except Exception as e:
     else:
         print(f"⚠ Bucket creation error: {e}")
 
+# %%
+print("Download the CUAD dataset")
+download_cuad_dataset(local_dir = LOCAL_DIR, max_workers=8 )
 
 # %%
-# Download CUAD Dataset from HuggingFace
-print("\n" + "=" * 60)
-print("DOWNLOADING CUAD DATASET FROM HUGGINGFACE to ", LOCAL_DIR)
-print("=" * 60)
-
-try:
-    snapshot_download(
-        repo_id=REPO_ID,
-        repo_type="dataset",
-        local_dir=LOCAL_DIR,
-        allow_patterns=["*.pdf", "*.PDF"],  # Handle both lowercase and uppercase
-        max_workers=8
-    )
-    print("✓ Dataset downloaded successfully to ", LOCAL_DIR)
-    
-except Exception as e:
-    print(f"✗ Failed to download dataset: {e}")
-    raise
-
-
-# %%
-# Count and Display Downloaded Files
+# Count and Display Files in downloaded directory
 print("\n" + "=" * 60)
 print("DOWNLOAD SUMMARY")
 print("=" * 60)
 
-cuad_data_path = Path(LOCAL_DIR) / "CUAD_v1"
-
+cuad_data_path = (Path(LOCAL_DIR) / "CUAD_v1/").resolve()
+pdf_list = find_pdfs(cuad_data_path)
 if cuad_data_path.exists():
-    pdf_count = len(find_pdfs(cuad_data_path))
+    pdf_count = len(pdf_list)
     print(f"✓ PDF documents found: {pdf_count}")
     
     if pdf_count == 510:
@@ -89,9 +80,9 @@ skipped = 0
 failed_count = 0
 failed_files = []
 
-for pdf_file in find_pdfs(cuad_data_path):
-    relative_path = pdf_file.relative_to(cuad_data_path)
-    s3_key = f"raw/{relative_path}"
+for pdf_file in pdf_list:
+    pdf_file_path = os.path.abspath(pdf_file)
+    s3_key = "raw/" + str(os.path.basename(pdf_file))
     
     # Check if file exists in MinIO
     file_exists = False
@@ -116,12 +107,12 @@ for pdf_file in find_pdfs(cuad_data_path):
                 ContentType="application/pdf"
             )
         new_uploads += 1
-        print(f"✓ Uploaded: {relative_path}")
+        print(f"✓ Uploaded: {pdf_file_path}")
     
     except Exception as e:
         failed_count += 1
-        failed_files.append(str(relative_path))
-        print(f"✗ Failed: {relative_path} - {e}")
+        failed_files.append(str(pdf_file_path))
+        print(f"✗ Failed: {pdf_file_path} - {e}")
 
 
 # %%
@@ -159,8 +150,8 @@ def file_exists_in_minio(file_name, bucket_name):
         bool: True if file exists, False otherwise
     """
     try:
-       # minio_client.head_object(Bucket=bucket_name, Key=file_name)
-        minio_client.list_objects_v2(Bucket=bucket_name, Prefix="raw/")
+        minio_client.head_object(Bucket=bucket_name, Key=file_name)
+       # minio_client.list_objects_v2(Bucket=bucket_name, Prefix="raw/")
         return True
     except:
         return False
@@ -194,10 +185,9 @@ def get_file_from_minio(file_name, bucket_name):
         print(f"✗ Error retrieving {file_name}: {e}")
         raise
 # %%
-minio_client.get_object(Bucket=BUCKET, Key="/full_contract_pdf/Part_I/Affiliate_Agreements/SteelVaultCorp_20081224_10-K_EX-10.16_3074935_EX-10.16_Affiliate Agreement.pdf")
+minio_client.head_object(Bucket=BUCKET, Key="raw/KIROMICBIOPHARMA,INC_04_08_2020-EX-10.28-JOINT VENTURE AGREEMENT.PDF")
 
 #file_exists_in_minio(bucket_name=BUCKET,file_name="cuad-contracts/raw/full_contract_pdf/Part_I/Affiliate_Agreements/SteelVaultCorp_20081224_10-K_EX-10.16_3074935_EX-10.16_Affiliate Agreement.pdf")
 #minio_client.list_objects_v2(Bucket=BUCKET, Prefix="raw/")
-
 
 # %%

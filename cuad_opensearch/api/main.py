@@ -6,6 +6,9 @@ Exposes BM25 + k-NN hybrid search over the cuad_dataset OpenSearch index.
 import os
 from contextlib import asynccontextmanager
 
+import boto3
+from botocore.config import Config
+
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from opensearchpy import OpenSearch, NotFoundError
@@ -14,10 +17,15 @@ from sentence_transformers import SentenceTransformer
 # ---------------------------------------------------------------------------
 # Configuration — all values overridable via environment variables
 # ---------------------------------------------------------------------------
-OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
-OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
-INDEX_NAME      = os.getenv("INDEX_NAME", "cuad_dataset")
-MODEL_NAME      = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+OPENSEARCH_HOST  = os.getenv("OPENSEARCH_HOST", "localhost")
+OPENSEARCH_PORT  = int(os.getenv("OPENSEARCH_PORT", "9200"))
+INDEX_NAME       = os.getenv("INDEX_NAME", "cuad_dataset")
+MODEL_NAME       = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
+BUCKET_NAME      = os.getenv("MINIO_BUCKET", "cuad-contracts")
+PRESIGNED_EXPIRY = int(os.getenv("PRESIGNED_EXPIRY_SECONDS", "3600"))  # 1 hour
 
 # ---------------------------------------------------------------------------
 # App startup / shutdown — load heavy resources once
@@ -34,6 +42,13 @@ async def lifespan(app: FastAPI):
         verify_certs=False,
     )
     _state["model"] = SentenceTransformer(MODEL_NAME, device="cpu")
+    _state["s3"] = boto3.client(
+        "s3",
+        endpoint_url=MINIO_ENDPOINT,
+        aws_access_key_id=MINIO_ACCESS_KEY,
+        aws_secret_access_key=MINIO_SECRET_KEY,
+        config=Config(signature_version="s3v4"),
+    )
     yield
     _state["client"].close()
 
@@ -56,12 +71,13 @@ class SearchResult(BaseModel):
     text: str
     char_start: int
     char_end: int
+    pdf_url: str
 
 
 class SearchResponse(BaseModel):
     query: str
     top_k: int
-    results: list[SearchResponse | SearchResult]
+    results: list[SearchResult]
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +167,7 @@ def search(
     """
     client: OpenSearch = _state["client"]
     model: SentenceTransformer = _state["model"]
+    s3 = _state["s3"]
 
     try:
         query_vector = model.encode(q, show_progress_bar=False).tolist()
@@ -165,13 +182,21 @@ def search(
         try:
             doc = client.get(index=INDEX_NAME, id=doc_id)
             src = doc["_source"]
+            title = src.get("title", "")
+            s3_key = f"raw/{title}.PDF"
+            pdf_url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": BUCKET_NAME, "Key": s3_key},
+                ExpiresIn=PRESIGNED_EXPIRY,
+            )
             results.append({
                 "id":         doc_id,
                 "score":      round(rrf_score, 6),
-                "title":      src.get("title", ""),
+                "title":      title,
                 "text":       src.get("text", ""),
                 "char_start": src.get("char_start", 0),
                 "char_end":   src.get("char_end", 0),
+                "pdf_url":    pdf_url,
             })
         except NotFoundError:
             continue

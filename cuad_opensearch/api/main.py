@@ -10,6 +10,7 @@ import boto3
 from botocore.config import Config
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from opensearchpy import OpenSearch, NotFoundError
 from sentence_transformers import SentenceTransformer
@@ -17,15 +18,16 @@ from sentence_transformers import SentenceTransformer
 # ---------------------------------------------------------------------------
 # Configuration — all values overridable via environment variables
 # ---------------------------------------------------------------------------
-OPENSEARCH_HOST  = os.getenv("OPENSEARCH_HOST", "localhost")
-OPENSEARCH_PORT  = int(os.getenv("OPENSEARCH_PORT", "9200"))
-INDEX_NAME       = os.getenv("INDEX_NAME", "cuad_dataset")
-MODEL_NAME       = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
-BUCKET_NAME      = os.getenv("MINIO_BUCKET", "cuad-contracts")
-PRESIGNED_EXPIRY = int(os.getenv("PRESIGNED_EXPIRY_SECONDS", "3600"))  # 1 hour
+OPENSEARCH_HOST   = os.getenv("OPENSEARCH_HOST", "localhost")
+OPENSEARCH_PORT   = int(os.getenv("OPENSEARCH_PORT", "9200"))
+INDEX_NAME        = os.getenv("INDEX_NAME", "cuad_dataset")
+MODEL_NAME        = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+MINIO_ENDPOINT    = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")     # internal
+MINIO_PUBLIC_ENDPOINT = os.getenv("MINIO_PUBLIC_ENDPOINT", MINIO_ENDPOINT)   # rewritten in URLs
+MINIO_ACCESS_KEY  = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+MINIO_SECRET_KEY  = os.getenv("MINIO_SECRET_KEY", "minioadmin")
+BUCKET_NAME       = os.getenv("MINIO_BUCKET", "cuad-contracts")
+PRESIGNED_EXPIRY  = int(os.getenv("PRESIGNED_EXPIRY_SECONDS", "3600"))  # 1 hour
 
 # ---------------------------------------------------------------------------
 # App startup / shutdown — load heavy resources once
@@ -58,6 +60,14 @@ app = FastAPI(
     description="BM25 + k-NN semantic search over CUAD contract chunks.",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -189,6 +199,10 @@ def search(
                 Params={"Bucket": BUCKET_NAME, "Key": s3_key},
                 ExpiresIn=PRESIGNED_EXPIRY,
             )
+            # Rewrite internal Docker hostname → public endpoint so the
+            # browser can actually reach MinIO on localhost:9000
+            if MINIO_PUBLIC_ENDPOINT != MINIO_ENDPOINT:
+                pdf_url = pdf_url.replace(MINIO_ENDPOINT, MINIO_PUBLIC_ENDPOINT, 1)
             results.append({
                 "id":         doc_id,
                 "score":      round(rrf_score, 6),

@@ -1,27 +1,34 @@
+# syntax=docker/dockerfile:1
 # ── CUAD Hybrid Search API ──────────────────────────────────────────────────
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl \
+# System deps
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential curl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade pip setuptools wheel
+# Python deps — cached by pip; only re-runs when this layer changes
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip setuptools wheel && \
+    pip install \
+        fastapi \
+        "uvicorn[standard]" \
+        opensearch-py \
+        sentence-transformers \
+        python-dotenv \
+        boto3
 
-RUN pip install \
-    fastapi \
-    "uvicorn[standard]" \
-    opensearch-py \
-    sentence-transformers \
-    python-dotenv
+# Pre-download the embedding model before copying app code so that
+# model re-downloads are NOT triggered by application code changes
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
 WORKDIR /app
 
-# Copy the API package
+# Copy app code last — changes here only invalidate this layer onward
 COPY cuad_opensearch/api/ /app/
 
 EXPOSE 8000
-
-# Pre-download the embedding model at build time so the first request is fast
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

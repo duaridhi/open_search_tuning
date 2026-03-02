@@ -1,0 +1,42 @@
+# Version control
+.git/
+.gitignore
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# Jupyter / notebook artifacts
+notebooks/
+.ipynb_checkpoints/
+*.ipynb
+
+# Large data — never send to build context
+cuad_opensearch/cuad_data/
+
+# Secrets / local config
+.env.*
+*.env
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker
+docker-compose*.yml
+Dockerfile*

@@ -1,11 +1,33 @@
 services:
 
-  # ── Hybrid Search REST API ───────────────────────────────────────────────
+  # ── MinIO object store (S3-compatible) ───────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: cuad-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # MinIO web console
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Hybrid Search REST API ─────────────────────────────────────
   api:
     build:
       context: .
       dockerfile: Dockerfile.api
     container_name: cuad-search-api-container
+    depends_on:
+      minio:
+        condition: service_healthy
     ports:
       - "8000:8000"
     environment:
@@ -13,4 +35,12 @@ services:
       - OPENSEARCH_PORT=9200
       - INDEX_NAME=cuad_dataset
       - EMBEDDING_MODEL=all-MiniLM-L6-v2
+      - MINIO_ENDPOINT=http://minio:9000          # internal Docker hostname
+      - MINIO_PUBLIC_ENDPOINT=http://localhost:9000  # rewritten into presigned URLs
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=cuad-contracts
     restart: unless-stopped
+
+volumes:
+  minio_data:

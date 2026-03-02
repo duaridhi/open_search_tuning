@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # ── CUAD Hybrid Search API ──────────────────────────────────────────────────
 FROM python:3.11-slim
 

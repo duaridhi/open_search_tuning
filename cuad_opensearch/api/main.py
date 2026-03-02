@@ -51,6 +51,15 @@ async def lifespan(app: FastAPI):
         aws_secret_access_key=MINIO_SECRET_KEY,
         config=Config(signature_version="s3v4"),
     )
+    # Separate client for presigned URLs — must be signed with the public
+    # endpoint so the signature is valid when the browser hits localhost:9000.
+    _state["s3_public"] = boto3.client(
+        "s3",
+        endpoint_url=MINIO_PUBLIC_ENDPOINT,
+        aws_access_key_id=MINIO_ACCESS_KEY,
+        aws_secret_access_key=MINIO_SECRET_KEY,
+        config=Config(signature_version="s3v4"),
+    )
     yield
     _state["client"].close()
 
@@ -178,6 +187,7 @@ def search(
     client: OpenSearch = _state["client"]
     model: SentenceTransformer = _state["model"]
     s3 = _state["s3"]
+    s3_public = _state["s3_public"]
 
     try:
         query_vector = model.encode(q, show_progress_bar=False).tolist()
@@ -193,16 +203,15 @@ def search(
             doc = client.get(index=INDEX_NAME, id=doc_id)
             src = doc["_source"]
             title = src.get("title", "")
-            s3_key = f"raw/{title}.PDF"
-            pdf_url = s3.generate_presigned_url(
+            s3_key = f"raw/{title}.pdf"
+            # Use the public-endpoint client so the presigned URL signature
+            # is computed with localhost:9000 — rewriting the host after
+            # signing would invalidate the signature and cause a 403.
+            pdf_url = s3_public.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": BUCKET_NAME, "Key": s3_key},
                 ExpiresIn=PRESIGNED_EXPIRY,
             )
-            # Rewrite internal Docker hostname → public endpoint so the
-            # browser can actually reach MinIO on localhost:9000
-            if MINIO_PUBLIC_ENDPOINT != MINIO_ENDPOINT:
-                pdf_url = pdf_url.replace(MINIO_ENDPOINT, MINIO_PUBLIC_ENDPOINT, 1)
             results.append({
                 "id":         doc_id,
                 "score":      round(rrf_score, 6),

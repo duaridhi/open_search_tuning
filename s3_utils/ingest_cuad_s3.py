@@ -82,7 +82,11 @@ failed_files = []
 
 for pdf_file in pdf_list:
     pdf_file_path = os.path.abspath(pdf_file)
-    s3_key = "raw/" + str(os.path.basename(pdf_file))
+    basename = os.path.basename(pdf_file)
+    # Normalize extension to lowercase .pdf
+    stem, ext = os.path.splitext(basename)
+    basename = stem + ext.lower()
+    s3_key = "raw/" + basename
     
     # Check if file exists in MinIO
     file_exists = False
@@ -191,3 +195,5 @@ minio_client.head_object(Bucket=BUCKET, Key="raw/KIROMICBIOPHARMA,INC_04_08_2020
 #minio_client.list_objects_v2(Bucket=BUCKET, Prefix="raw/")
 
 # %%
+
+

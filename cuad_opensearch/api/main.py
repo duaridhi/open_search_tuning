@@ -117,6 +117,19 @@ class SearchResponse(BaseModel):
     results: list[SearchResult]
 
 
+class DocumentInfo(BaseModel):
+    name: str
+    s3_key: str
+    size_bytes: int | None = None
+    last_modified: str | None = None
+    pdf_url: str | None = None
+
+
+class DocumentListResponse(BaseModel):
+    total: int
+    documents: list[DocumentInfo]
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -124,6 +137,67 @@ class SearchResponse(BaseModel):
 def health():
     """Liveness check."""
     return {"status": "ok"}
+
+
+@app.get("/documents", response_model=DocumentListResponse)
+def list_documents(
+    prefix: str = Query("raw/", description="S3 key prefix to list objects under"),
+    include_urls: bool = Query(False, description="Whether to include presigned URLs for each document"),
+):
+    """
+    List all documents stored in the S3/MinIO bucket.
+
+    Returns document names, keys, sizes, and optionally presigned download URLs.
+    """
+    s3 = _state["s3"]
+    s3_public = _state["s3_public"]
+
+    documents: list[DocumentInfo] = []
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        pages = paginator.paginate(Bucket=BUCKET_NAME, Prefix=prefix)
+
+        for page in pages:
+            for obj in page.get("Contents", []):
+                key: str = obj["Key"]
+                # Skip "directory" placeholder keys
+                if key.endswith("/"):
+                    continue
+
+                # Strip prefix and .pdf suffix to derive human-readable name
+                name = key[len(prefix):] if key.startswith(prefix) else key
+                if name.lower().endswith(".pdf"):
+                    name = name[:-4]
+
+                pdf_url = None
+                if include_urls:
+                    try:
+                        pdf_url = s3_public.generate_presigned_url(
+                            "get_object",
+                            Params={"Bucket": BUCKET_NAME, "Key": key},
+                            ExpiresIn=PRESIGNED_EXPIRY,
+                        )
+                    except Exception as url_err:
+                        print(f"[WARNING] Could not generate presigned URL for {key}: {url_err}")
+
+                last_modified = obj.get("LastModified")
+                documents.append(
+                    DocumentInfo(
+                        name=name,
+                        s3_key=key,
+                        size_bytes=obj.get("Size"),
+                        last_modified=last_modified.isoformat() if last_modified else None,
+                        pdf_url=pdf_url,
+                    )
+                )
+    except Exception as exc:
+        print(f"[ERROR] Failed to list documents from S3: {exc}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(exc)}")
+
+    documents.sort(key=lambda d: d.name.lower())
+    return DocumentListResponse(total=len(documents), documents=documents)
 
 
 @app.get("/search", response_model=dict)

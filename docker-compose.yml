@@ -1,5 +1,23 @@
 services:
 
+  # ── OpenSearch (search engine) ─────────────────────────────────
+  opensearch:
+    image: opensearchproject/opensearch:2.11.1
+    container_name: cuad-opensearch
+    environment:
+      - discovery.type=single-node
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      - DISABLE_SECURITY_PLUGIN=true
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   # ── MinIO object store (S3-compatible) ───────────────────────────
   minio:
     image: minio/minio:latest
@@ -26,14 +44,16 @@ services:
       dockerfile: Dockerfile.api
     container_name: cuad-search-api-container
     depends_on:
+      opensearch:
+        condition: service_healthy
       minio:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      - "8888:8888"
     environment:
-      - OPENSEARCH_HOST=host.docker.internal
+      - OPENSEARCH_HOST=opensearch
       - OPENSEARCH_PORT=9200
-      - INDEX_NAME=cuad_dataset
+      - INDEX_NAME=cuad_pdf_dataset
       - EMBEDDING_MODEL=all-MiniLM-L6-v2
       - MINIO_ENDPOINT=http://minio:9000          # internal Docker hostname
       - MINIO_PUBLIC_ENDPOINT=http://localhost:9000  # rewritten into presigned URLs

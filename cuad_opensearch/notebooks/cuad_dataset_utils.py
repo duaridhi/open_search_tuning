@@ -4,18 +4,15 @@ cuad_dataset_utils.py
 Generic utilities for loading and transforming the CUAD dataset into data
 structures needed for indexing, search, and evaluation.
 
-All functions are stateless and framework-agnostic — they only depend on
-the HuggingFace `datasets` library and the Python standard library.
+All functions are stateless and depend only on the Python standard library.
 
 Public API — JSON / SQuAD-style source
 ---------------------------------------
-load_cuad_hf(split, dataset_name)          → HuggingFace Dataset
 load_cuad_local_json(json_path)            → list[dict]  (contracts)
 iter_cuad_paragraphs(contracts)            → Iterator[dict]
 build_corpus(contracts)                    → dict[doc_id, {title, text}]
 build_queries(contracts)                   → dict[qid, question_text]
 build_qrels(contracts)                     → dict[qid, {doc_id: relevance}]
-build_qrels_hf(hf_dataset)                → (qrels, qid_to_question)
 build_beir_triplet(json_path|contracts)    → (corpus, queries, qrels)
 iter_index_actions(contracts, model, ...)  → Iterator[OpenSearch bulk action]
 
@@ -43,8 +40,40 @@ from typing import Iterator
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_HF_DATASET = "theatticusproject/cuad-qa"
 DEFAULT_JSON_FIELD = "data"          # top-level key inside CUAD_v1.json
+
+
+def _get_cuad_json_path() -> Path:
+    """
+    Resolve the path to CUAD_v1.json relative to this module's location.
+    
+    Returns the path: <cuad_opensearch>/cuad_data/CUAD_v1/CUAD_v1.json
+    
+    Returns
+    -------
+    Path
+        Absolute path to CUAD_v1.json
+    
+    Raises
+    ------
+    FileNotFoundError
+        If the JSON file cannot be found in the expected locations.
+    """
+    # Try relative to this script (cuad_opensearch/notebooks/cuad_dataset_utils.py)
+    json_path = Path(__file__).resolve().parent.parent / "cuad_data" / "CUAD_v1" / "CUAD_v1.json"
+    if json_path.exists():
+        return json_path
+    
+    # Fallback: try alternate path structure
+    json_path = Path(__file__).resolve().parent.parent / "data" / "CUAD_v1.json"
+    if json_path.exists():
+        return json_path
+    
+    raise FileNotFoundError(
+        f"CUAD JSON not found. Tried:\n"
+        f"  1. {Path(__file__).resolve().parent.parent / 'cuad_data' / 'CUAD_v1' / 'CUAD_v1.json'}\n"
+        f"  2. {Path(__file__).resolve().parent.parent / 'data' / 'CUAD_v1.json'}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -72,36 +101,6 @@ def _make_doc_id(title: str, paragraph_index: int) -> str:
 # ---------------------------------------------------------------------------
 # Dataset loading
 # ---------------------------------------------------------------------------
-
-def load_cuad_hf(
-    split: str = "test",
-    dataset_name: str = DEFAULT_HF_DATASET,
-    *,
-    trust_remote_code: bool = True,
-):
-    """
-    Load a CUAD split directly from HuggingFace Hub.
-
-    Parameters
-    ----------
-    split : str
-        HuggingFace split name, e.g. ``"train"``, ``"test"``.
-    dataset_name : str
-        HuggingFace dataset repo, default ``"theatticusproject/cuad-qa"``.
-    trust_remote_code : bool
-        Passed through to ``load_dataset``.
-
-    Returns
-    -------
-    datasets.Dataset
-    """
-    from datasets import load_dataset  # lazy import — keeps utils lightweight
-
-    print(f"[cuad_utils] Loading '{dataset_name}' ({split}) from HuggingFace …")
-    ds = load_dataset(dataset_name, split=split, trust_remote_code=trust_remote_code)
-    print(f"[cuad_utils]   {len(ds):,} samples loaded.")
-    return ds
-
 
 def load_cuad_local_json(
     json_path: str | Path,
@@ -240,38 +239,6 @@ def build_qrels(contracts: list[dict]) -> dict[str, dict[str, int]]:
         f"{total_pairs:,} (query, doc) pairs."
     )
     return qrels
-
-
-def build_qrels_hf(hf_dataset) -> tuple[dict[str, dict[str, int]], dict[str, str]]:
-    """
-    Build qrels and qid→question mapping from a HuggingFace CUAD-QA dataset.
-
-    Suitable for datasets loaded via ``load_cuad_hf()``.
-
-    Returns
-    -------
-    qrels          : { qid: { doc_id: relevance } }
-    qid_to_question: { qid: question_text }
-    """
-    qrels: dict[str, dict[str, int]] = {}
-    qid_to_question: dict[str, str] = {}
-
-    for sample in hf_dataset:
-        qid    = question_to_qid(sample["question"])
-        doc_id = sample["id"]
-        relevant = len(sample["answers"]["text"]) > 0
-
-        qid_to_question[qid] = sample["question"]
-        if qid not in qrels:
-            qrels[qid] = {}
-        qrels[qid][doc_id] = 1 if relevant else 0
-
-    total_pairs = sum(len(v) for v in qrels.values())
-    print(
-        f"[cuad_utils] Qrels (HF) built: {len(qrels):,} queries, "
-        f"{total_pairs:,} (query, doc) pairs."
-    )
-    return qrels, qid_to_question
 
 
 # ---------------------------------------------------------------------------

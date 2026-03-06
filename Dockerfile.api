@@ -28,6 +28,6 @@ WORKDIR /app
 # Copy app code last — changes here only invalidate this layer onward
 COPY cuad_opensearch/api/ /app/
 
-EXPOSE 8000
+EXPOSE 8888
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

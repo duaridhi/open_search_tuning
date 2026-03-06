@@ -41,6 +41,8 @@ def split_text_with_offsets(text: str, chunk_size: int, chunk_overlap: int) -> l
                 end = start + split_at
                 chunk_text = text[start:end]
         chunks.append({"text": chunk_text, "char_start": start, "char_end": end})
+        if end >= len(text):   # reached the end — stop; avoids tail micro-chunk loop
+            break
         next_start = end - chunk_overlap
         if next_start <= start:
             next_start = start + 1
@@ -48,11 +50,11 @@ def split_text_with_offsets(text: str, chunk_size: int, chunk_overlap: int) -> l
     return chunks
 
 # %% Constants & configuration
-CUAD_JSON_PATH = Path(__file__).resolve().parent.parent / "data" / "CUAD_v1.json"
+CUAD_JSON_PATH = Path(__file__).resolve().parent.parent / "cuad_data" /"CUAD_v1"/ "CUAD_v1.json"
 INDEX_NAME = "cuad_dataset"
 CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "indexing_checkpoint.json"
 
-MAX_DOCS = 2  # Max source rows to process from the dataset
+MAX_DOCS = 10000  # Max source rows to process from the dataset
 ENCODE_BATCH_SIZE = 32
 BULK_CHUNK_SIZE = 200
 
@@ -238,3 +240,4 @@ client.indices.put_settings(
         }
     }
 )
+

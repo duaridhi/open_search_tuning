@@ -11,6 +11,8 @@ load_dotenv()
 # OpenSearch connection settings
 OPENSEARCH_HOST = "localhost"
 OPENSEARCH_PORT = 9200
+INDEX_NAME     = os.getenv("INDEX_NAME")
+
 client = OpenSearch(
         hosts=[{"host": OPENSEARCH_HOST, "port": OPENSEARCH_PORT}],
         http_compress=True,   # gzip-compress request/response bodies
@@ -21,7 +23,7 @@ client = OpenSearch(
 client.info()
 
 # Define the index name
-INDEX_NAME = "cuad_dataset"
+#INDEX_NAME = "cuad_dataset"
 
 # Define index settings and mappings
 index_settings = {

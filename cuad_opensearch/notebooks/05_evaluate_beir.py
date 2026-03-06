@@ -2,10 +2,12 @@
 import json
 import os
 import sys
+from pathlib import Path
 
+from dotenv import load_dotenv
 from beir import util
-from beir import Dataset
-from beir import Evaluate
+from beir.datasets.data_loader import GenericDataLoader
+from beir.retrieval.evaluation import EvaluateRetrieval
 
 root_path = Path("/home/ridhi/projects/project1/open_search_tuning")
 if str(root_path) not in sys.path:
@@ -23,27 +25,22 @@ REPO_ID = "theatticusproject/cuad"
 # Connect to OpenSearch
 client = connect()
 
-# Load the CUAD dataset
-dataset = Dataset(REPO_ID)  # Update with the actual path to the CUAD dataset
+# Load a dataset
+loader = GenericDataLoader(data_folder=REPO_ID)
+corpus, queries, qrels = loader.load_custom()
 
 # %%
 # Function to evaluate using BEIR
 def evaluate_beir():
     # Load the queries and ground truth
-    queries = dataset.get_queries()
-    ground_truth = dataset.get_ground_truth()
+    # Placeholder model - replace with actual model instance
+    # Evaluate
+    # evaluator = EvaluateRetrieval(model)
+    # ndcg, _map, recall, precision = evaluator.evaluate(corpus, queries, qrels)
+    pass
 
-    # Perform search using the hybrid search implementation
-    search_results = perform_hybrid_search(queries)
 
-    # Evaluate the search results using BEIR
-    evaluator = Evaluate()
-    metrics = evaluator.evaluate(search_results, ground_truth)
-
-    # Print evaluation metrics
-    print("Evaluation Metrics:")
-    for metric, value in metrics.items():
-        print(f"{metric}: {value}")
+# %%
 
 # Function to perform hybrid search (to be implemented)
 def perform_hybrid_search(queries):
@@ -53,3 +50,4 @@ def perform_hybrid_search(queries):
 # %%
 if __name__ == "__main__":
     evaluate_beir()
+# %%

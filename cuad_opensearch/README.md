@@ -9,7 +9,7 @@ cuad_opensearch
 ├── notebooks
 │   ├── 01_setup_cuad_index.py        # Sets up the OpenSearch index for the CUAD dataset
 │   ├── 02_ingest_cuad_documents.py    # Ingests CUAD documents into OpenSearch
-│   ├── 03_hybrid_search.py             # Implements hybrid search functionality
+│   ├── hybrid_search.py                # Implements hybrid search functionality
 │   ├── 04_evaluate_pytrec_eval.py      # Evaluates search results using PyTREC metrics
 │   └── 05_evaluate_beir.py             # Evaluates using the BEIR framework
 ├── open_search_connect.py               # Connection logic to OpenSearch service
@@ -39,7 +39,7 @@ cuad_opensearch
    Execute the `02_ingest_cuad_documents.py` notebook to index the CUAD dataset documents into OpenSearch.
 
 6. **Perform Hybrid Search**: 
-   Use the `03_hybrid_search.py` notebook to implement and test the hybrid search functionality.
+   Use the `hybrid_search.py` notebook to implement and test the hybrid search functionality.
 
 7. **Evaluate Search Results**: 
    Run `04_evaluate_pytrec_eval.py` to evaluate the search results using PyTREC metrics, and `05_evaluate_beir.py` for evaluation using the BEIR framework.

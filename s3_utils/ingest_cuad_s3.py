@@ -13,7 +13,7 @@ root_path = Path("/home/ridhi/projects/project1/open_search_tuning")
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path))
 
-from connect_s3 import get_storage_client
+from s3_utils.connect_s3 import get_storage_client
 from cuad_opensearch.notebooks.cuad_download_utils import download_cuad_dataset, find_pdfs
 from cuad_opensearch.notebooks.cuad_download_utils import download_cuad_dataset
 

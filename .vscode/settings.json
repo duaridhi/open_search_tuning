@@ -1,2 +1,58 @@
 {
+    // ── File watcher exclusions ──────────────────────────────────────────
+    // Prevents VS Code from watching large non-code directories, which
+    // causes the extension host to become unresponsive.
+    "files.watcherExclude": {
+        "**/__pycache__/**": true,
+        "**/.venv/**": true,
+        "**/cuad_opensearch/cuad_data/**": true,
+        "**/cuad_data/.cach/**": true,
+        "**/*.pdf": true,
+        "**/*.PDF": true,
+        "**/indexing_checkpoint.json": false
+    },
+
+    // ── Explorer / editor exclusions ─────────────────────────────────────
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/.venv": true,
+        "cuad_opensearch/cuad_data/.cach": true
+    },
+
+    // ── Search exclusions ────────────────────────────────────────────────
+    "search.exclude": {
+        "**/__pycache__/**": true,
+        "**/.venv/**": true,
+        "**/cuad_opensearch/cuad_data/**": true,
+        "**/*.pdf": true,
+        "**/*.PDF": true,
+        "***/.github/**" :true,
+         "**/.idea/**" : true
+
+    },
+
+    // ── Pylance / Python analysis exclusions ─────────────────────────────
+    "python.analysis.exclude": [
+        "**/cuad_opensearch/cuad_data/**",
+        "**/__pycache__/**",
+        "**/.venv/**",
+        "**/.github/**",
+         "**/.idea/**"
+
+    ],
+    "python.linting.enabled": false,
+    "python.languageServer": "None",
+    "python.terminal.executeInFileDir": true,
+    
+    // ── Terminal configuration ──────────────────────────────────────────
+    "terminal.integrated.profiles.linux": {
+        "bash": {
+            "path": "bash",
+            "args": ["-i"]
+        }
+    },
+    "terminal.integrated.defaultProfile.linux": "bash",
+    "terminal.integrated.env.linux": {
+        "VIRTUAL_ENV": "/home/ridhi/.venv"
+    }
 }

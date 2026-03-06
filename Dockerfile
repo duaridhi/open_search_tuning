@@ -28,7 +28,7 @@ RUN python -m ipykernel install --name python3 --display-name "Python 3" --sys-p
 
 WORKDIR /workspace
 
-EXPOSE 8888
+EXPOSE 8889
 
 CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
 

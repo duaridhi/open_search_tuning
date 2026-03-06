@@ -5,12 +5,14 @@
 # connection logic across the project.
 # ---------------------------------------------------------------------------
 
-# Default connection settings — override via environment variables if needed
-OPENSEARCH_HOST = "localhost"   # hostname where OpenSearch is running
-OPENSEARCH_PORT = 9200          # default OpenSearch REST API port
-INDEX_NAME = "cuad_dataset"  # default index used by this project
+import os
 
 from opensearchpy import OpenSearch
+
+# Connection settings — read from environment variables
+OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
+OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
+INDEX_NAME      = os.getenv("INDEX_NAME", "cuad_dataset")
 
 
 # ----------------------------
@@ -35,7 +37,10 @@ def connect() -> OpenSearch:
         hosts=[{"host": OPENSEARCH_HOST, "port": OPENSEARCH_PORT}],
         http_compress=True,   # gzip-compress request/response bodies
         use_ssl=False,        # set True for HTTPS clusters
-        verify_certs=False    # set True when using a valid TLS cert
+        verify_certs=False,   # set True when using a valid TLS cert
+        timeout=60,           # seconds to wait for a response before closing the connection
+        max_retries=3,        # retry transient connection errors
+        retry_on_timeout=True,
     )
     # Verify the cluster is reachable; raises an exception if not
     client.info()

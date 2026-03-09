@@ -1,0 +1,59 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:venv",
+
+    // ── File watcher exclusions (reduces inotify load & CPU usage) ──────────
+    "files.watcherExclude": {
+        "**/.git/objects/**": true,
+        "**/.git/subtree-cache/**": true,
+        "**/__pycache__/**": true,
+        "**/*.pyc": true,
+        "**/*.pyo": true,
+        "**/.venv/**": true,
+        "**/venv/**": true,
+        "**/.tox/**": true,
+        "**/node_modules/**": true,
+        "**/dist/**": true,
+        "**/build/**": true,
+        "**/cuad_data/**": true,
+        "**/full_contract_pdf/**": true,
+        "**/*.pdf": true,
+        "**/*.PDF": true
+    },
+
+    // ── Explorer exclusions (hides clutter from the sidebar) ─────────────────
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        "**/*.pyo": true,
+        "**/.pytest_cache": true,
+        "**/*.egg-info": true
+    },
+
+    // ── Search exclusions (speeds up Ctrl+Shift+F) ───────────────────────────
+    "search.exclude": {
+        "**/__pycache__": true,
+        "**/.venv": true,
+        "**/venv": true,
+        "**/node_modules": true,
+        "**/dist": true,
+        "**/build": true,
+        "**/cuad_data": true,
+        "**/full_contract_pdf": true,
+        "**/*.pdf": true,
+        "**/*.PDF": true,
+        "**/*.json": false
+    },
+
+    // ── Python analysis — limit what Pylance indexes ─────────────────────────
+    "python.analysis.exclude": [
+        "**/cuad_data/**",
+        "**/full_contract_pdf/**",
+        "**/__pycache__/**",
+        "**/.venv/**",
+        "**/venv/**"
+    ],
+    "python.analysis.indexing": true,
+    "python.analysis.packageIndexDepths": [
+        { "name": "", "depth": 2 }
+    ]
+}

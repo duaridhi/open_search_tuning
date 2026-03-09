@@ -3,8 +3,7 @@
 upload_to_qdrant.py
 ───────────────────
 Extracts text from CUAD PDF contracts, generates embeddings with
-all-MiniLM-L6-v2, and uploads up to 1 000 chunks to a Qdrant Cloud
-collection named 'cuad_contracts'.
+all-MiniLM-L6-v2, and uploads chunks to a Qdrant collection named 'cuad_contracts'.
 
 Reuses the PDF extraction and chunking logic from:
   project1/open_search_tuning/cuad_opensearch/notebooks/extract_index_cuad_pdfs.py
@@ -15,8 +14,9 @@ Usage
 
 Environment (loaded from .env in this directory)
 ─────────────────────────────────────────────────
-    QDRANT_API_KEY   – Qdrant Cloud API key
-    CLUSTER_URL      – Qdrant Cloud cluster URL (without port)
+    QDRANT_URL      – Local Qdrant URL (default: http://localhost:6333)
+    CLUSTER_URL     – Qdrant Cloud cluster URL (takes precedence over QDRANT_URL)
+    QDRANT_API_KEY  – Cloud API key
 
 Optional env vars
 ─────────────────
@@ -34,17 +34,16 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from tqdm import tqdm
+
+# Import cluster connection
+from qdrant_cluster_connect import get_qdrant_client
 
 print("[INFO] Imports loaded successfully.")
 
 # %% Configuration — load .env and set constants
 load_dotenv(Path(__file__).resolve().parent / ".env")
-
-QDRANT_API_KEY    = os.environ["QDRANT_API_KEY"]
-CLUSTER_URL       = os.environ["CLUSTER_URL"].strip()
 
 COLLECTION_NAME   = "cuad_contracts"
 VECTOR_SIZE       = 384  # all-MiniLM-L6-v2
@@ -61,7 +60,6 @@ PDF_ROOT = Path(
 )
 
 print(f"[INFO] Config loaded:")
-print(f"       CLUSTER_URL      = {CLUSTER_URL}")
 print(f"       COLLECTION_NAME  = {COLLECTION_NAME}")
 print(f"       VECTOR_SIZE      = {VECTOR_SIZE}")
 print(f"       MAX_DOCS         = {MAX_DOCS}")
@@ -237,14 +235,8 @@ def iter_chunks(all_pdfs: list[Path], limit: int):
 
 
 # %% Connect to Qdrant and create collection if needed
-print(f"[INFO] Connecting to Qdrant: {CLUSTER_URL}")
-qdrant = QdrantClient(
-    url=f"{CLUSTER_URL}:6333",
-    api_key=QDRANT_API_KEY,
-    timeout=30,          # seconds — avoids silent hangs if cluster is unreachable
-    prefer_grpc=False,
-)
-print("[INFO] Qdrant client created.")
+qdrant = get_qdrant_client()
+print("[INFO] Qdrant client initialized.")
 
 existing = [c.name for c in qdrant.get_collections().collections]
 print(f"[DEBUG] Existing collections: {existing}")

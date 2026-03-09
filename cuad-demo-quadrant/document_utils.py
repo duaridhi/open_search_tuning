@@ -18,6 +18,14 @@ def get_unique_documents(client: QdrantClient, collection_name: str) -> List[Dic
         List of dicts with document metadata: title, word_count, chunk_count, pdf_path
     """
     try:
+        # Check if collection exists
+        try:
+            collection_info = client.get_collection(collection_name)
+            print(f"[DEBUG] Collection '{collection_name}' has {collection_info.points_count} points")
+        except Exception as e:
+            print(f"[ERROR] Collection '{collection_name}' not found: {e}")
+            return []
+
         # Retrieve all points (with pagination if collection is large)
         scroll_results, _ = client.scroll(
             collection_name=collection_name,
@@ -25,6 +33,8 @@ def get_unique_documents(client: QdrantClient, collection_name: str) -> List[Dic
             with_payload=True,
             with_vectors=False,
         )
+
+        print(f"[DEBUG] Retrieved {len(scroll_results)} points from collection")
 
         # Aggregate by title to get unique documents
         doc_map: Dict[str, Dict] = {}

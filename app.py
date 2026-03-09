@@ -28,16 +28,26 @@ sys.path.insert(0, str(qdrant_dir))
 from qdrant_search import (
     init_qdrant,
     init_embedding_service,
+    init_highlighting,
     search,
     get_collection_stats,
 )
 from document_utils import get_unique_documents, get_document_info
-from qdrant_client import QdrantClient
+from qdrant_cluster_connect import get_cluster_info
+from s3_utils import init_s3_clients, generate_presigned_url, list_s3_documents
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pydantic Response Models
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+class Highlight(BaseModel):
+    """Highlight position from Qdrant."""
+
+    start: Optional[int] = Field(None, description="Start position (if available)")
+    end: Optional[int] = Field(None, description="End position (if available)")
+    field: Optional[str] = Field(None, description="Field name containing highlight")
 
 
 class SearchResult(BaseModel):
@@ -47,11 +57,19 @@ class SearchResult(BaseModel):
     score: float = Field(..., description="Similarity score (0-1)")
     title: str = Field(..., description="Contract title")
     text: str = Field(..., description="Chunk text")
+    highlights: list[Highlight] = Field(
+        default=[],
+        description="Query term highlights from Qdrant",
+    )
     page_start: int = Field(..., description="Starting page number")
     page_end: int = Field(..., description="Ending page number")
     char_start: int = Field(..., description="Character offset (page start)")
     char_end: int = Field(..., description="Character offset (page end)")
     pdf_path: str = Field(..., description="Relative path to PDF")
+    pdf_url: Optional[str] = Field(
+        None,
+        description="Presigned URL for PDF download",
+    )
     source: list[str] = Field(
         default=["embeddings"],
         description="Search method source",
@@ -73,6 +91,14 @@ class DocumentMetadata(BaseModel):
 
     title: str = Field(..., description="Contract title/name")
     pdf_path: str = Field(..., description="Path to PDF file")
+    s3_key: Optional[str] = Field(
+        None,
+        description="S3 object key for PDF",
+    )
+    pdf_url: Optional[str] = Field(
+        None,
+        description="Presigned URL for PDF download",
+    )
     chunk_count: int = Field(..., description="Number of chunks")
     total_chars: int = Field(..., description="Total characters")
 
@@ -125,6 +151,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[ERROR] Failed to initialize embedding service: {e}")
 
+    # Initialize S3 clients for presigned URLs
+    try:
+        init_s3_clients()
+        print("[INFO] S3 clients initialized for presigned URL generation")
+    except Exception as e:
+        print(f"[WARN] S3 initialization failed (PDFs may not have presigned URLs): {e}")
+
+    # Initialize highlighting (create text indices)
+    try:
+        init_highlighting()
+        print("[INFO] Highlighting initialized with text indices")
+    except Exception as e:
+        print(f"[WARN] Could not initialize highlighting: {e}")
+
     # Check collection stats
     try:
         stats = get_collection_stats()
@@ -168,19 +208,23 @@ async def health_check():
     """Health check endpoint."""
     try:
         stats = get_collection_stats()
-        if stats.get("status") == "ready":
-            return HealthResponse(
-                status="ok",
-                collection=stats.get("collection"),
-                points_count=stats.get("points_count"),
-                vector_size=stats.get("vector_size"),
-            )
-        else:
+        print(f"[DEBUG] Health check - stats: {stats}")
+        
+        if stats.get("status") == "error":
+            print(f"[WARN] Collection error: {stats.get('error')}")
             return HealthResponse(
                 status="degraded",
                 collection=stats.get("collection"),
             )
+        
+        return HealthResponse(
+            status="ok",
+            collection=stats.get("collection"),
+            points_count=stats.get("points_count"),
+            vector_size=stats.get("vector_size"),
+        )
     except Exception as e:
+        print(f"[ERROR] Health check exception: {type(e).__name__}: {e}")
         raise HTTPException(
             status_code=503,
             detail=f"Health check failed: {str(e)}",
@@ -215,7 +259,7 @@ async def search_contracts(
       - strategy: Search strategy (semantic_search or hybrid_search)
 
     Returns:
-      List of matching contract chunks with scores and metadata.
+      List of matching contract chunks with scores, metadata, and presigned PDF URLs.
     """
     try:
         results, metadata = search(
@@ -225,22 +269,40 @@ async def search_contracts(
             strategy=strategy,
         )
 
-        # Convert to SearchResult objects
-        search_results = [
-            SearchResult(
-                id=r["id"],
-                score=r["score"],
-                title=r["title"],
-                text=r["text"],
-                page_start=r["page_start"],
-                page_end=r["page_end"],
-                char_start=r["char_start"],
-                char_end=r["char_end"],
-                pdf_path=r["pdf_path"],
-                source=r.get("source", ["embeddings"]),
+        # Convert to SearchResult objects with presigned URLs and highlights
+        search_results = []
+        for r in results:
+            # Generate presigned URL: format is "raw/{title}.pdf"
+            s3_key = f"raw/{r['title']}.pdf"
+            pdf_url = generate_presigned_url(s3_key)
+            
+            # Convert highlight positions to Highlight objects
+            hl_list = []
+            for hl in r.get("highlights", []):
+                hl_list.append(
+                    Highlight(
+                        start=hl.get("start"),
+                        end=hl.get("end"),
+                        field=hl.get("field"),
+                    )
+                )
+            
+            search_results.append(
+                SearchResult(
+                    id=r["id"],
+                    score=r["score"],
+                    title=r["title"],
+                    text=r["text"],
+                    highlights=hl_list,
+                    page_start=r["page_start"],
+                    page_end=r["page_end"],
+                    char_start=r["char_start"],
+                    char_end=r["char_end"],
+                    pdf_path=r["pdf_path"],
+                    pdf_url=pdf_url,
+                    source=r.get("source", ["embeddings"]),
+                )
             )
-            for r in results
-        ]
 
         return SearchResponse(
             query=q,
@@ -261,24 +323,48 @@ async def search_contracts(
 async def list_documents() -> DocumentListResponse:
     """
     List all indexed documents (contracts) in the Qdrant collection.
+    Each document includes a presigned URL for direct PDF download.
 
     Returns:
-      List of document metadata including title, path, chunk count, etc.
+      List of document metadata including title, path, chunk count, and presigned URLs.
     """
     try:
         qdrant_client = init_qdrant()
-        documents = get_unique_documents(qdrant_client, "cuad_contracts")
+        qdrant_documents = get_unique_documents(qdrant_client, "cuad_contracts")
 
-        return DocumentListResponse(
-            documents=[
+        # Try to enrich with S3 presigned URLs
+        try:
+            s3_documents = list_s3_documents()
+            
+            # Create mapping of title -> S3 doc info
+            s3_map = {doc["title"]: doc for doc in s3_documents}
+            
+            # Combine Qdrant metadata with S3 URLs
+            documents = []
+            for d in qdrant_documents:
+                s3_info = s3_map.get(d["title"], {})
+                documents.append(DocumentMetadata(
+                    title=d["title"],
+                    pdf_path=d["pdf_path"],
+                    s3_key=s3_info.get("s3_key"),
+                    pdf_url=s3_info.get("pdf_url"),
+                    chunk_count=d["chunk_count"],
+                    total_chars=d["total_chars"],
+                ))
+        except Exception as s3_error:
+            print(f"[WARN] Could not fetch S3 documents, returning Qdrant-only: {s3_error}")
+            documents = [
                 DocumentMetadata(
                     title=d["title"],
                     pdf_path=d["pdf_path"],
                     chunk_count=d["chunk_count"],
                     total_chars=d["total_chars"],
                 )
-                for d in documents
-            ],
+                for d in qdrant_documents
+            ]
+
+        return DocumentListResponse(
+            documents=documents,
             total=len(documents),
         )
 
@@ -297,7 +383,7 @@ async def get_document_detail(
     Get detailed information about a specific document.
 
     Returns:
-      Document metadata and chunk information.
+      Document metadata, chunk information, and presigned PDF URL.
     """
     try:
         qdrant_client = init_qdrant()

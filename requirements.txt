@@ -11,6 +11,9 @@ qdrant-client>=1.7.0
 sentence-transformers>=2.2.0
 torch>=2.0.0
 
+# S3/MinIO & Object Storage
+boto3>=1.26.0
+
 # Utilities
 tqdm>=4.66.0
 

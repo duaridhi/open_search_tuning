@@ -19,40 +19,31 @@ Qdrant Collection Structure:
 import os
 from typing import Optional, Tuple
 from pathlib import Path as PathLib
-from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-# Import embedding client
+# Import cluster connection and embedding client
+from qdrant_cluster_connect import get_qdrant_client, get_cluster_info
 from embeddings.embedding_client import get_embedding_client
+from highlights import setup_highlighting, extract_highlights_from_point, get_highlight_positions
 
 
 # Configuration
-QDANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-QDANT_API_KEY = os.getenv("QDRANT_API_KEY", None)
 COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "cuad_contracts")
 EMBEDDING_SERVICE_URL = os.getenv("EMBEDDING_SERVICE_URL", "http://localhost:8001")
 
-# Cached client
-_client: Optional[QdrantClient] = None
+
+def init_qdrant():
+    """Initialize Qdrant client via cluster connection module."""
+    return get_qdrant_client()
 
 
-def init_qdrant(url: str = QDANT_URL, api_key: Optional[str] = QDANT_API_KEY):
-    """Initialize Qdrant client (called at app startup)."""
-    global _client
-    if _client is None:
-        try:
-            _client = QdrantClient(
-                url=url,
-                api_key=api_key,
-                timeout=30,
-            )
-            # Test connection
-            _client.get_collections()
-            print(f"[INFO] Qdrant client initialized and connected: {url}")
-        except Exception as e:
-            print(f"[ERROR] Failed to initialize Qdrant client: {e}")
-            raise
-    return _client
+def init_highlighting():
+    """Setup text indices for highlighting on collection."""
+    try:
+        setup_highlighting(COLLECTION_NAME, field_names=["text", "title"])
+        print(f"[INFO] Highlighting initialized for {COLLECTION_NAME}")
+    except Exception as e:
+        print(f"[WARN] Could not initialize highlighting: {e}")
 
 
 def init_embedding_service(url: str = EMBEDDING_SERVICE_URL):
@@ -68,11 +59,9 @@ def init_embedding_service(url: str = EMBEDDING_SERVICE_URL):
         raise
 
 
-def get_client() -> QdrantClient:
-    """Get or initialize Qdrant client."""
-    if _client is None:
-        init_qdrant()
-    return _client
+def get_client():
+    """Get Qdrant client from cluster connection module."""
+    return get_qdrant_client()
 
 
 def embed_query(query: str) -> list[float]:
@@ -127,22 +116,31 @@ def semantic_search(
                 ]
             )
 
-        # Search in Qdrant
+        # Search in Qdrant using query_points (for qdrant-client 1.7.x)
         print(f"[DEBUG] Searching Qdrant collection '{COLLECTION_NAME}'...")
-        search_results = client.search(
+        search_results = client.query_points(
             collection_name=COLLECTION_NAME,
-            query_vector=query_embedding,
+            query=query_embedding,
             query_filter=search_filter,
             limit=top_k,
             with_payload=True,
         )
-        print(f"[DEBUG] Found {len(search_results)} results")
+        print(f"[DEBUG] Found {len(search_results.points)} results")
 
         # Format results
         results = []
-        for point in search_results:
+        for point in search_results.points:
             if point.score >= min_score:
                 payload = point.payload
+                
+                # Extract highlights from Qdrant search result
+                highlights_data = extract_highlights_from_point(
+                    point,
+                    query,
+                    field_name="text",
+                )
+                highlight_positions = get_highlight_positions(highlights_data)
+                
                 results.append(
                     {
                         "id": payload.get("doc_id"),
@@ -155,6 +153,7 @@ def semantic_search(
                         "char_end": payload.get("char_end"),
                         "pdf_path": payload.get("pdf_path"),
                         "source": ["embeddings"],  # Qdrant is vector/semantic search
+                        "highlights": highlight_positions,  # From Qdrant highlighting
                     }
                 )
 
@@ -171,7 +170,7 @@ def semantic_search(
 
     except AttributeError as e:
         print(f"[ERROR] Qdrant client method error: {e}")
-        raise ValueError(f"Qdrant client error - method not found: {e}")
+        raise ValueError(f"Qdrant client error - using query_points method: {e}")
     except Exception as e:
         print(f"[ERROR] Search error: {type(e).__name__}: {e}")
         raise
@@ -250,19 +249,53 @@ def get_collection_stats() -> dict:
     """Get collection statistics for health checks."""
     try:
         client = get_client()
+        print(f"[DEBUG] Fetching stats for collection: {COLLECTION_NAME}")
+        
+        # Get collection info
         collection_info = client.get_collection(COLLECTION_NAME)
+        print(f"[DEBUG] Collection info retrieved: {collection_info}")
+        
+        # Extract points count
+        points_count = getattr(collection_info, "points_count", 0)
+        
+        # Extract vector config - handle different nested structures
+        vector_size = None
+        distance = None
+        
+        try:
+            # Try new structure first
+            if hasattr(collection_info, "config"):
+                config = collection_info.config
+                if hasattr(config, "params"):
+                    params = config.params
+                    if hasattr(params, "vectors"):
+                        vectors_config = params.vectors
+                        if isinstance(vectors_config, dict):
+                            vector_size = vectors_config.get("size")
+                            distance = vectors_config.get("distance")
+                        else:
+                            vector_size = getattr(vectors_config, "size", None)
+                            distance = getattr(vectors_config, "distance", None)
+        except Exception as e:
+            print(f"[DEBUG] Could not extract vector config: {e}")
+        
         return {
             "collection": COLLECTION_NAME,
-            "points_count": collection_info.points_count,
-            "vector_size": collection_info.config.params.vectors.size,
-            "distance": str(collection_info.config.params.vectors.distance),
-            "status": "ready",
+            "points_count": points_count,
+            "vector_size": vector_size,
+            "distance": str(distance) if distance else "unknown",
+            "status": "ready" if points_count is not None else "ready",
         }
     except Exception as e:
+        print(f"[ERROR] Failed to get collection stats: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         return {
             "collection": COLLECTION_NAME,
             "status": "error",
             "error": str(e),
+            "points_count": None,
+            "vector_size": None,
         }
 
 

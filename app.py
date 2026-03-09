@@ -28,7 +28,6 @@ sys.path.insert(0, str(qdrant_dir))
 from qdrant_search import (
     init_qdrant,
     init_embedding_service,
-    init_highlighting,
     search,
     get_collection_stats,
 )
@@ -41,16 +40,6 @@ from s3_utils import init_s3_clients, generate_presigned_url, list_s3_documents
 # Pydantic Response Models
 # ─────────────────────────────────────────────────────────────────────────────
 
-
-class Highlight(BaseModel):
-    """Highlight position from search results (OpenSearch compatible format)."""
-
-    start: int = Field(..., description="Start position in text")
-    end: int = Field(..., description="End position in text")
-    text: str = Field(..., description="Matched text with context and markup")
-    query_text: str = Field(..., description="The query term that was matched")
-
-
 class SearchResult(BaseModel):
     """Single search result."""
 
@@ -58,10 +47,6 @@ class SearchResult(BaseModel):
     score: float = Field(..., description="Similarity score (0-1)")
     title: str = Field(..., description="Contract title")
     text: str = Field(..., description="Chunk text")
-    highlight: dict = Field(
-        default_factory=dict,
-        description="Query term highlights grouped by field name",
-    )
     page_start: int = Field(..., description="Starting page number")
     page_end: int = Field(..., description="Ending page number")
     char_start: int = Field(..., description="Character offset (page start)")
@@ -167,13 +152,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[WARN] S3 initialization failed (PDFs may not have presigned URLs): {e}")
 
-    # Initialize highlighting (create text indices)
-    try:
-        init_highlighting()
-        print("[INFO] Highlighting initialized with text indices")
-    except Exception as e:
-        print(f"[WARN] Could not initialize highlighting: {e}")
-
     # Check collection stats
     try:
         stats = get_collection_stats()
@@ -278,32 +256,12 @@ async def search_contracts(
             strategy=strategy,
         )
 
-        # Convert to SearchResult objects with presigned URLs and highlights
+        # Convert to SearchResult objects with presigned URLs
         search_results = []
         for r in results:
             # Generate presigned URL: format is "raw/{title}.pdf"
             s3_key = f"raw/{r['title']}.pdf"
             pdf_url = generate_presigned_url(s3_key)
-            
-            # Convert highlight positions to Highlight objects grouped by field
-            highlights_dict = {}
-            highlights_by_field = r.get("highlights", {})
-            
-            print(f"[DEBUG] /search endpoint - result '{r.get('title', 'N/A')[:30]}' - highlights_by_field type={type(highlights_by_field)}, value={highlights_by_field}")
-            
-            for field_name, highlights_list in highlights_by_field.items():
-                highlights_dict[field_name] = []
-                for hl in highlights_list:
-                    highlights_dict[field_name].append(
-                        Highlight(
-                            start=hl.get("start"),
-                            end=hl.get("end"),
-                            text=hl.get("text", ""),
-                            query_text=hl.get("query_text", ""),
-                        )
-                    )
-            
-            print(f"[DEBUG] /search endpoint - result '{r.get('title', 'N/A')[:30]}' - final highlights_dict={highlights_dict}")
             
             search_results.append(
                 SearchResult(
@@ -311,7 +269,6 @@ async def search_contracts(
                     score=r["score"],
                     title=r["title"],
                     text=r["text"],
-                    highlight=highlights_dict,
                     page_start=r["page_start"],
                     page_end=r["page_end"],
                     char_start=r["char_start"],

@@ -27,7 +27,7 @@ sys.path.insert(0, str(qdrant_dir))
 
 from qdrant_search import (
     init_qdrant,
-    init_model,
+    init_embedding_service,
     search,
     get_collection_stats,
 )
@@ -118,12 +118,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[ERROR] Failed to initialize Qdrant: {e}")
 
-    # Initialize embedding model
+    # Initialize embedding service client
     try:
-        model = init_model(device="cpu")
-        print(f"[INFO] Embedding model initialized (device: cpu)")
+        embedding_service = init_embedding_service()
+        print(f"[INFO] Embedding service client initialized")
     except Exception as e:
-        print(f"[ERROR] Failed to initialize embedding model: {e}")
+        print(f"[ERROR] Failed to initialize embedding service: {e}")
 
     # Check collection stats
     try:

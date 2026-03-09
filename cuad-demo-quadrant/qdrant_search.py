@@ -18,23 +18,25 @@ Qdrant Collection Structure:
 
 import os
 from typing import Optional, Tuple
-from sentence_transformers import SentenceTransformer
+from pathlib import Path as PathLib
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
+# Import embedding client
+from embeddings.embedding_client import get_embedding_client
+
 
 # Configuration
-QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", None)
+QDANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDANT_API_KEY = os.getenv("QDRANT_API_KEY", None)
 COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "cuad_contracts")
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+EMBEDDING_SERVICE_URL = os.getenv("EMBEDDING_SERVICE_URL", "http://localhost:8001")
 
-# Cached model and client
-_model: Optional[SentenceTransformer] = None
+# Cached client
 _client: Optional[QdrantClient] = None
 
 
-def init_qdrant(url: str = QDRANT_URL, api_key: Optional[str] = QDRANT_API_KEY):
+def init_qdrant(url: str = QDANT_URL, api_key: Optional[str] = QDANT_API_KEY):
     """Initialize Qdrant client (called at app startup)."""
     global _client
     if _client is None:
@@ -53,13 +55,17 @@ def init_qdrant(url: str = QDRANT_URL, api_key: Optional[str] = QDRANT_API_KEY):
     return _client
 
 
-def init_model(device: str = "cpu"):
-    """Initialize embedding model (called at app startup)."""
-    global _model
-    if _model is None:
-        _model = SentenceTransformer(EMBEDDING_MODEL, device=device)
-        print(f"[INFO] Embedding model loaded: {EMBEDDING_MODEL}")
-    return _model
+def init_embedding_service(url: str = EMBEDDING_SERVICE_URL):
+    """Initialize embedding service client (called at app startup)."""
+    try:
+        embedding_client = get_embedding_client()
+        # Test connection
+        health = embedding_client.health()
+        print(f"[INFO] Embedding service connected: {url} - {health}")
+        return embedding_client
+    except Exception as e:
+        print(f"[ERROR] Failed to connect to embedding service at {url}: {e}")
+        raise
 
 
 def get_client() -> QdrantClient:
@@ -69,11 +75,18 @@ def get_client() -> QdrantClient:
     return _client
 
 
-def get_model() -> SentenceTransformer:
-    """Get or initialize embedding model."""
-    if _model is None:
-        init_model()
-    return _model
+def embed_query(query: str) -> list[float]:
+    """Embed query using remote embedding service."""
+    try:
+        embedding_client = get_embedding_client()
+        print(f"[DEBUG] Encoding query via embedding service: {query[:50]}...")
+        embeddings = embedding_client.embed([query])
+        embedding_vector = embeddings[0] if embeddings else []
+        print(f"[DEBUG] Query embedding shape: {len(embedding_vector)}")
+        return embedding_vector
+    except Exception as e:
+        print(f"[ERROR] Failed to embed query: {e}")
+        raise
 
 
 def semantic_search(
@@ -98,12 +111,9 @@ def semantic_search(
     """
     try:
         client = get_client()
-        model = get_model()
 
-        # Embed query
-        print(f"[DEBUG] Encoding query: {query[:50]}...")
-        query_embedding = model.encode(query, normalize_embeddings=True).tolist()
-        print(f"[DEBUG] Query embedding shape: {len(query_embedding)}")
+        # Embed query using embedding service
+        query_embedding = embed_query(query)
 
         # Build filter if document_name specified
         search_filter = None

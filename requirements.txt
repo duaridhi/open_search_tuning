@@ -16,4 +16,5 @@ boto3>=1.26.0
 
 # Utilities
 tqdm>=4.66.0
+nltk>=3.8.0
 

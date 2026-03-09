@@ -4,27 +4,26 @@ qdrant_search.py
 Search backend for CUAD contracts using Qdrant vector database.
 
 Supports:
-  - Semantic similarity search (vector-based)
-  - Hybrid search combining metadata filtering and vector similarity
-  - Document filtering by title
-  - Configurable result count and scoring thresholds
+    - Semantic similarity search (vector-based)
+    - Hybrid search combining metadata filtering and vector similarity
+    - Document filtering by title
+    - Configurable result count and scoring thresholds
 
 Qdrant Collection Structure:
   - collection_name: "cuad_contracts"
   - vector_size: 384 (all-MiniLM-L6-v2)
   - distance: COSINE
-  - payload fields: doc_id, title, text, page_start, page_end, pdf_path, char_start, char_end
+    - payload fields: doc_id, title, text, page_start, page_end, pdf_path, char_start, char_end,
+        page_offset_start, page_offset_end
 """
 
 import os
 from typing import Optional, Tuple
-from pathlib import Path as PathLib
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
 # Import cluster connection and embedding client
 from qdrant_cluster_connect import get_qdrant_client, get_cluster_info
 from embeddings.embedding_client import get_embedding_client
-from highlights import setup_highlighting, extract_highlights_from_point, get_highlight_positions
 
 
 # Configuration
@@ -35,16 +34,6 @@ EMBEDDING_SERVICE_URL = os.getenv("EMBEDDING_SERVICE_URL", "http://localhost:800
 def init_qdrant():
     """Initialize Qdrant client via cluster connection module."""
     return get_qdrant_client()
-
-
-def init_highlighting():
-    """Setup text indices for highlighting on collection."""
-    try:
-        setup_highlighting(COLLECTION_NAME, field_names=["text", "title"])
-        print(f"[INFO] Highlighting initialized for {COLLECTION_NAME}")
-    except Exception as e:
-        print(f"[WARN] Could not initialize highlighting: {e}")
-
 
 def init_embedding_service(url: str = EMBEDDING_SERVICE_URL):
     """Initialize embedding service client (called at app startup)."""
@@ -132,28 +121,23 @@ def semantic_search(
         for point in search_results.points:
             if point.score >= min_score:
                 payload = point.payload
-                
-                # Extract highlights from Qdrant search result
-                highlights_data = extract_highlights_from_point(
-                    point,
-                    query,
-                    field_name="text",
-                )
-                highlight_positions = get_highlight_positions(highlights_data)
+                text = payload.get("text", "")
+                title = payload.get("title", "Unknown")
                 
                 results.append(
                     {
                         "id": payload.get("doc_id"),
                         "score": point.score,
-                        "title": payload.get("title"),
-                        "text": payload.get("text"),
+                        "title": title,
+                        "text": text,
                         "page_start": payload.get("page_start"),
                         "page_end": payload.get("page_end"),
                         "char_start": payload.get("char_start"),
                         "char_end": payload.get("char_end"),
+                        "page_offset_start": payload.get("page_offset_start"),
+                        "page_offset_end": payload.get("page_offset_end"),
                         "pdf_path": payload.get("pdf_path"),
                         "source": ["embeddings"],  # Qdrant is vector/semantic search
-                        "highlights": highlight_positions,  # From Qdrant highlighting
                     }
                 )
 

@@ -43,11 +43,12 @@ from s3_utils import init_s3_clients, generate_presigned_url, list_s3_documents
 
 
 class Highlight(BaseModel):
-    """Highlight position from Qdrant."""
+    """Highlight position from search results (OpenSearch compatible format)."""
 
-    start: Optional[int] = Field(None, description="Start position (if available)")
-    end: Optional[int] = Field(None, description="End position (if available)")
-    field: Optional[str] = Field(None, description="Field name containing highlight")
+    start: int = Field(..., description="Start position in text")
+    end: int = Field(..., description="End position in text")
+    text: str = Field(..., description="Matched text with context and markup")
+    query_text: str = Field(..., description="The query term that was matched")
 
 
 class SearchResult(BaseModel):
@@ -57,14 +58,22 @@ class SearchResult(BaseModel):
     score: float = Field(..., description="Similarity score (0-1)")
     title: str = Field(..., description="Contract title")
     text: str = Field(..., description="Chunk text")
-    highlights: list[Highlight] = Field(
-        default=[],
-        description="Query term highlights from Qdrant",
+    highlight: dict = Field(
+        default_factory=dict,
+        description="Query term highlights grouped by field name",
     )
     page_start: int = Field(..., description="Starting page number")
     page_end: int = Field(..., description="Ending page number")
     char_start: int = Field(..., description="Character offset (page start)")
     char_end: int = Field(..., description="Character offset (page end)")
+    page_offset_start: Optional[int] = Field(
+        None,
+        description="Chunk start offset local to page_start",
+    )
+    page_offset_end: Optional[int] = Field(
+        None,
+        description="Chunk end offset local to page_end",
+    )
     pdf_path: str = Field(..., description="Relative path to PDF")
     pdf_url: Optional[str] = Field(
         None,
@@ -276,16 +285,25 @@ async def search_contracts(
             s3_key = f"raw/{r['title']}.pdf"
             pdf_url = generate_presigned_url(s3_key)
             
-            # Convert highlight positions to Highlight objects
-            hl_list = []
-            for hl in r.get("highlights", []):
-                hl_list.append(
-                    Highlight(
-                        start=hl.get("start"),
-                        end=hl.get("end"),
-                        field=hl.get("field"),
+            # Convert highlight positions to Highlight objects grouped by field
+            highlights_dict = {}
+            highlights_by_field = r.get("highlights", {})
+            
+            print(f"[DEBUG] /search endpoint - result '{r.get('title', 'N/A')[:30]}' - highlights_by_field type={type(highlights_by_field)}, value={highlights_by_field}")
+            
+            for field_name, highlights_list in highlights_by_field.items():
+                highlights_dict[field_name] = []
+                for hl in highlights_list:
+                    highlights_dict[field_name].append(
+                        Highlight(
+                            start=hl.get("start"),
+                            end=hl.get("end"),
+                            text=hl.get("text", ""),
+                            query_text=hl.get("query_text", ""),
+                        )
                     )
-                )
+            
+            print(f"[DEBUG] /search endpoint - result '{r.get('title', 'N/A')[:30]}' - final highlights_dict={highlights_dict}")
             
             search_results.append(
                 SearchResult(
@@ -293,11 +311,13 @@ async def search_contracts(
                     score=r["score"],
                     title=r["title"],
                     text=r["text"],
-                    highlights=hl_list,
+                    highlight=highlights_dict,
                     page_start=r["page_start"],
                     page_end=r["page_end"],
                     char_start=r["char_start"],
                     char_end=r["char_end"],
+                    page_offset_start=r.get("page_offset_start"),
+                    page_offset_end=r.get("page_offset_end"),
                     pdf_path=r["pdf_path"],
                     pdf_url=pdf_url,
                     source=r.get("source", ["embeddings"]),

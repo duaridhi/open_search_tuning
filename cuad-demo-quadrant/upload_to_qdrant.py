@@ -34,7 +34,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, PayloadSchemaType
 from tqdm import tqdm
 
 # Import cluster connection
@@ -178,6 +178,13 @@ def char_range_to_pages(char_start: int, char_end: int, page_map: list) -> tuple
     return (first or 1, last or 1)
 
 
+def char_pos_to_page_offset(char_pos: int, page_number: int, page_map: list) -> int:
+    for seg_start, seg_end, pg in page_map:
+        if pg == page_number:
+            return max(0, min(char_pos, seg_end) - seg_start)
+    return 0
+
+
 # %% PDF discovery & chunk iterator
 def find_pdfs(root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.upper() == ".PDF")
@@ -218,6 +225,12 @@ def iter_chunks(all_pdfs: list[Path], limit: int):
             pg_start, pg_end = char_range_to_pages(
                 chunk["char_start"], chunk["char_end"], page_map
             )
+            page_offset_start = char_pos_to_page_offset(
+                chunk["char_start"], pg_start, page_map
+            )
+            page_offset_end = char_pos_to_page_offset(
+                chunk["char_end"], pg_end, page_map
+            )
             yield {
                 "doc_id":     f"{title}-chunk-{chunk_idx}",
                 "title":      title,
@@ -226,6 +239,8 @@ def iter_chunks(all_pdfs: list[Path], limit: int):
                 "char_end":   chunk["char_end"],
                 "page_start": pg_start,
                 "page_end":   pg_end,
+                "page_offset_start": page_offset_start,
+                "page_offset_end":   page_offset_end,
                 "pdf_path":   rel_path,
             }
             count += 1
@@ -248,6 +263,16 @@ else:
         vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
     )
     print(f"[INFO] Collection '{COLLECTION_NAME}' created (dim={VECTOR_SIZE}, distance=Cosine).")
+
+try:
+    qdrant.create_payload_index(
+        collection_name=COLLECTION_NAME,
+        field_name="title",
+        field_schema=PayloadSchemaType.KEYWORD,
+    )
+    print(f"[INFO] Keyword index ensured on {COLLECTION_NAME}.title")
+except Exception as exc:
+    print(f"[WARN] Could not create keyword index on {COLLECTION_NAME}.title: {exc}")
 
 
 # %% Load embedding model
@@ -293,6 +318,8 @@ def flush_buffer(buf: list[dict]) -> int:
                 "char_end":   d["char_end"],
                 "page_start": d["page_start"],
                 "page_end":   d["page_end"],
+                "page_offset_start": d["page_offset_start"],
+                "page_offset_end":   d["page_offset_end"],
                 "pdf_path":   d["pdf_path"],
             },
         )

@@ -1,3 +1,16 @@
-fastapi
-uvicorn[standard]
+# FastAPI & Web Framework
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# Qdrant Vector Database
+qdrant-client>=2.7.0
+
+# Embeddings & ML
+sentence-transformers>=2.2.0
+torch>=2.0.0
+
+# Utilities
+tqdm>=4.66.0
 

@@ -38,12 +38,18 @@ def init_qdrant(url: str = QDRANT_URL, api_key: Optional[str] = QDRANT_API_KEY):
     """Initialize Qdrant client (called at app startup)."""
     global _client
     if _client is None:
-        _client = QdrantClient(
-            url=url,
-            api_key=api_key,
-            timeout=30,
-        )
-        print(f"[INFO] Qdrant client initialized: {url}")
+        try:
+            _client = QdrantClient(
+                url=url,
+                api_key=api_key,
+                timeout=30,
+            )
+            # Test connection
+            _client.get_collections()
+            print(f"[INFO] Qdrant client initialized and connected: {url}")
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize Qdrant client: {e}")
+            raise
     return _client
 
 
@@ -90,63 +96,75 @@ def semantic_search(
           results: List of search result dicts with scores, text, source info
           metadata: Dict with query, top_k, strategy used, filter info
     """
-    client = get_client()
-    model = get_model()
+    try:
+        client = get_client()
+        model = get_model()
 
-    # Embed query
-    query_embedding = model.encode(query, normalize_embeddings=True).tolist()
+        # Embed query
+        print(f"[DEBUG] Encoding query: {query[:50]}...")
+        query_embedding = model.encode(query, normalize_embeddings=True).tolist()
+        print(f"[DEBUG] Query embedding shape: {len(query_embedding)}")
 
-    # Build filter if document_name specified
-    search_filter = None
-    if document_name:
-        search_filter = Filter(
-            must=[
-                FieldCondition(
-                    key="title",
-                    match=MatchValue(value=document_name),
-                )
-            ]
-        )
-
-    # Search in Qdrant
-    search_results = client.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=query_embedding,
-        query_filter=search_filter,
-        limit=top_k,
-        with_payload=True,
-    )
-
-    # Format results
-    results = []
-    for point in search_results:
-        if point.score >= min_score:
-            payload = point.payload
-            results.append(
-                {
-                    "id": payload.get("doc_id"),
-                    "score": point.score,
-                    "title": payload.get("title"),
-                    "text": payload.get("text"),
-                    "page_start": payload.get("page_start"),
-                    "page_end": payload.get("page_end"),
-                    "char_start": payload.get("char_start"),
-                    "char_end": payload.get("char_end"),
-                    "pdf_path": payload.get("pdf_path"),
-                    "source": ["embeddings"],  # Qdrant is vector/semantic search
-                }
+        # Build filter if document_name specified
+        search_filter = None
+        if document_name:
+            search_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="title",
+                        match=MatchValue(value=document_name),
+                    )
+                ]
             )
 
-    metadata = {
-        "query": query,
-        "top_k": top_k,
-        "strategy": "semantic_search",
-        "document_filter": document_name,
-        "min_score": min_score,
-        "results_count": len(results),
-    }
+        # Search in Qdrant
+        print(f"[DEBUG] Searching Qdrant collection '{COLLECTION_NAME}'...")
+        search_results = client.search(
+            collection_name=COLLECTION_NAME,
+            query_vector=query_embedding,
+            query_filter=search_filter,
+            limit=top_k,
+            with_payload=True,
+        )
+        print(f"[DEBUG] Found {len(search_results)} results")
 
-    return results, metadata
+        # Format results
+        results = []
+        for point in search_results:
+            if point.score >= min_score:
+                payload = point.payload
+                results.append(
+                    {
+                        "id": payload.get("doc_id"),
+                        "score": point.score,
+                        "title": payload.get("title"),
+                        "text": payload.get("text"),
+                        "page_start": payload.get("page_start"),
+                        "page_end": payload.get("page_end"),
+                        "char_start": payload.get("char_start"),
+                        "char_end": payload.get("char_end"),
+                        "pdf_path": payload.get("pdf_path"),
+                        "source": ["embeddings"],  # Qdrant is vector/semantic search
+                    }
+                )
+
+        metadata = {
+            "query": query,
+            "top_k": top_k,
+            "strategy": "semantic_search",
+            "document_filter": document_name,
+            "min_score": min_score,
+            "results_count": len(results),
+        }
+
+        return results, metadata
+
+    except AttributeError as e:
+        print(f"[ERROR] Qdrant client method error: {e}")
+        raise ValueError(f"Qdrant client error - method not found: {e}")
+    except Exception as e:
+        print(f"[ERROR] Search error: {type(e).__name__}: {e}")
+        raise
 
 
 def hybrid_search(

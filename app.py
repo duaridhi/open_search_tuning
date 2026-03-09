@@ -14,15 +14,15 @@ import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Path
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 # Import Qdrant search and utilities
 import sys
-from pathlib import Path
+from pathlib import Path as PathLib
 
-qdrant_dir = Path(__file__).parent / "cuad-demo-quadrant"
+qdrant_dir = PathLib(__file__).parent / "cuad-demo-quadrant"
 sys.path.insert(0, str(qdrant_dir))
 
 from qdrant_search import (
@@ -291,7 +291,7 @@ async def list_documents() -> DocumentListResponse:
 
 @app.get("/documents/{document_name}", response_model=DocumentDetailResponse, tags=["Documents"])
 async def get_document_detail(
-    document_name: str = Query(..., description="Document/contract title"),
+    document_name: str = Path(..., description="Document/contract title"),
 ) -> DocumentDetailResponse:
     """
     Get detailed information about a specific document.

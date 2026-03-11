@@ -8,7 +8,7 @@ Supports:
     - Hybrid search combining metadata filtering and vector similarity
     - Document filtering by title
     - Configurable result count and scoring thresholds
-
+highlight_qdrant_data_point
 Qdrant Collection Structure:
   - collection_name: "cuad_contracts"
   - vector_size: 384 (all-MiniLM-L6-v2)
@@ -34,18 +34,6 @@ EMBEDDING_SERVICE_URL = os.getenv("EMBEDDING_SERVICE_URL", "http://localhost:800
 def init_qdrant():
     """Initialize Qdrant client via cluster connection module."""
     return get_qdrant_client()
-
-def init_embedding_service(url: str = EMBEDDING_SERVICE_URL):
-    """Initialize embedding service client (called at app startup)."""
-    try:
-        embedding_client = get_embedding_client()
-        # Test connection
-        health = embedding_client.health()
-        print(f"[INFO] Embedding service connected: {url} - {health}")
-        return embedding_client
-    except Exception as e:
-        print(f"[ERROR] Failed to connect to embedding service at {url}: {e}")
-        raise
 
 
 def get_client():
@@ -118,11 +106,37 @@ def semantic_search(
 
         # Format results
         results = []
+        embedding_client = get_embedding_client()
+        
         for point in search_results.points:
             if point.score >= min_score:
                 payload = point.payload
                 text = payload.get("text", "")
                 title = payload.get("title", "Unknown")
+                chunk_page_offset_start = payload.get("page_offset_start", 0)
+                
+                # Get highlights from embedding service
+                highlighted_sentences = []
+                highlight_sentence_indexes = []
+                highlight_page_offset_starts = []
+                highlight_page_offset_ends = []
+                try:
+                    highlights_response = embedding_client.highlight(
+                        query=query,
+                        document=text
+                    )
+                    highlighted_sentences = highlights_response.get("highlighted_sentences", [])
+                    highlight_sentence_indexes = highlights_response.get("highlight_sentence_indexes", [])
+                    highlight_offsets = highlights_response.get("highlight_offsets", [])
+                    
+                    # Convert chunk-relative offsets to page-relative offsets
+                    for chunk_start, chunk_end in highlight_offsets:
+                        page_start = chunk_page_offset_start + chunk_start if chunk_page_offset_start else chunk_start
+                        page_end = chunk_page_offset_start + chunk_end if chunk_page_offset_start else chunk_end
+                        highlight_page_offset_starts.append(page_start)
+                        highlight_page_offset_ends.append(page_end)
+                except Exception as e:
+                    print(f"[WARN] Failed to highlight result for '{title}': {e}")
                 
                 results.append(
                     {
@@ -134,10 +148,12 @@ def semantic_search(
                         "page_end": payload.get("page_end"),
                         "char_start": payload.get("char_start"),
                         "char_end": payload.get("char_end"),
-                        "page_offset_start": payload.get("page_offset_start"),
-                        "page_offset_end": payload.get("page_offset_end"),
+                        "page_offset_start": highlight_page_offset_starts if highlight_page_offset_starts else payload.get("page_offset_start"),
+                        "page_offset_end": highlight_page_offset_ends if highlight_page_offset_ends else payload.get("page_offset_end"),
                         "pdf_path": payload.get("pdf_path"),
                         "source": ["embeddings"],  # Qdrant is vector/semantic search
+                        "highlighted_sentences": highlighted_sentences,
+                        "highlight_sentence_indexes": highlight_sentence_indexes,
                     }
                 )
 

@@ -1,0 +1,45 @@
+# Development Environment (Local) - Default
+# Uses cloud Qdrant for vector database
+#
+# USAGE (from repository root):
+#   docker-compose up --build          # Use .env.dev automatically
+#   docker-compose --env-file .env.dev up --build   # Explicit
+#   docker-compose logs -f             # View logs
+#   docker-compose down                # Stop
+#
+# ENVIRONMENT FILE: .env.dev
+# ACTUAL CONFIGS: Dockerfile in docker/
+
+services:
+  # Main CUAD API Application
+  cuad-api:
+    env_file: .env.dev
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: development
+      # Enable BuildKit inline cache for faster subsequent builds
+      cache_from:
+        - type=registry,ref=cuad-ai:latest-dev
+      cache_to:
+        - type=inline
+    container_name: cuad-api-dev
+    ports:
+      - "7860:7860"      # Main API
+      - "8001:8001"      # Embedding Service
+    environment:
+      - EMBEDDING_SERVICE_URL=http://localhost:8001
+      - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-all-MiniLM-L6-v2}
+      - EMBEDDING_SERVICE_DEVICE=${EMBEDDING_SERVICE_DEVICE:-cpu}
+    networks:
+      - cuad-network
+    volumes:
+      # Live reload for development
+      - ./cuad-demo-quadrant:/app/cuad-demo-quadrant
+      - ./app.py:/app/app.py
+    stdin_open: true
+    tty: true
+
+networks:
+  cuad-network:
+    driver: bridge

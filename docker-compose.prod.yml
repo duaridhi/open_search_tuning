@@ -1,0 +1,39 @@
+# Production Environment - HF Spaces or Cloud Deployment
+# Uses cloud Qdrant for vector database
+#
+# USAGE (from repository root):
+#   docker-compose -f docker-compose.prod.yml up --build   # Local production test
+#   docker-compose -f docker-compose.prod.yml logs -f
+#
+# ENV FILE: .env.prod (with QDRANT_URL and QDRANT_API_KEY set)
+# DEPLOYMENT: Automatic deployment to HF Spaces when Dockerfile is detected
+
+services:
+  # Main CUAD API Application (with embedded Embedding Service)
+  cuad-api:
+    env_file: .env.prod
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: production
+    container_name: cuad-api-prod
+    ports:
+      - "7860:7860"  # Main API (exposed)
+    environment:
+      # Embedding Service (Internal, port 8001 not exposed)
+      - EMBEDDING_SERVICE_URL=http://localhost:8001
+      - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-all-MiniLM-L6-v2}
+      - EMBEDDING_SERVICE_DEVICE=${EMBEDDING_SERVICE_DEVICE:-cpu}
+    networks:
+      - cuad-prod-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+networks:
+  cuad-prod-network:
+    driver: bridge

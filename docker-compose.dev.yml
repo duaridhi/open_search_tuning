@@ -1,0 +1,38 @@
+# Development Environment - Explicit Dev Config
+# Uses cloud Qdrant for vector database
+#
+# USAGE (from repository root):
+#   docker-compose -f docker-compose.dev.yml up --build   # Explicit dev config
+#   docker-compose -f docker-compose.dev.yml logs -f
+#
+# ENV FILE: .env.dev
+# This is equivalent to docker-compose.yml (which also targets dev)
+
+services:
+  # Main CUAD API Application
+  cuad-api:
+    env_file: .env.dev
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: development
+    container_name: cuad-api-dev
+    ports:
+      - "7860:7860"      # Main API
+      - "8001:8001"      # Embedding Service
+    environment:
+      - EMBEDDING_SERVICE_URL=http://localhost:8001
+      - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-all-MiniLM-L6-v2}
+      - EMBEDDING_SERVICE_DEVICE=${EMBEDDING_SERVICE_DEVICE:-cpu}
+    networks:
+      - cuad-dev-network
+    volumes:
+      # Live reload for development
+      - ./cuad-demo-quadrant:/app/cuad-demo-quadrant
+      - ./app.py:/app/app.py
+    stdin_open: true
+    tty: true
+
+networks:
+  cuad-dev-network:
+    driver: bridge

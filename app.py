@@ -11,6 +11,7 @@ Provides REST API endpoints for:
 """
 
 import os
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -27,13 +28,23 @@ sys.path.insert(0, str(qdrant_dir))
 
 from qdrant_search import (
     init_qdrant,
-    init_embedding_service,
     search,
     get_collection_stats,
 )
 from document_utils import get_unique_documents, get_document_info
 from qdrant_cluster_connect import get_cluster_info
 from s3_utils import init_s3_clients, generate_presigned_url, list_s3_documents
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Timeout Configurations (in seconds)
+# ─────────────────────────────────────────────────────────────────────────────
+INIT_QDRANT_TIMEOUT = int(os.getenv("INIT_QDRANT_TIMEOUT", "30"))
+INIT_S3_TIMEOUT = int(os.getenv("INIT_S3_TIMEOUT", "10"))
+COLLECTION_STATS_TIMEOUT = int(os.getenv("COLLECTION_STATS_TIMEOUT", "10"))
+SEARCH_TIMEOUT = int(os.getenv("SEARCH_TIMEOUT", "60"))
+DOCS_LIST_TIMEOUT = int(os.getenv("DOCS_LIST_TIMEOUT", "20"))
+DOCS_DETAIL_TIMEOUT = int(os.getenv("DOCS_DETAIL_TIMEOUT", "15"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -51,13 +62,13 @@ class SearchResult(BaseModel):
     page_end: int = Field(..., description="Ending page number")
     char_start: int = Field(..., description="Character offset (page start)")
     char_end: int = Field(..., description="Character offset (page end)")
-    page_offset_start: Optional[int] = Field(
+    page_offset_start: Optional[int | list[int]] = Field(
         None,
-        description="Chunk start offset local to page_start",
+        description="Chunk start offset local to page_start, or array of highlight offsets if highlights found",
     )
-    page_offset_end: Optional[int] = Field(
+    page_offset_end: Optional[int | list[int]] = Field(
         None,
-        description="Chunk end offset local to page_end",
+        description="Chunk end offset local to page_end, or array of highlight offsets if highlights found",
     )
     pdf_path: str = Field(..., description="Relative path to PDF")
     pdf_url: Optional[str] = Field(
@@ -67,6 +78,14 @@ class SearchResult(BaseModel):
     source: list[str] = Field(
         default=["embeddings"],
         description="Search method source",
+    )
+    highlighted_sentences: list[str] = Field(
+        default=[],
+        description="Sentences highlighted by semantic highlighter",
+    )
+    highlight_sentence_indexes: list[int] = Field(
+        default=[],
+        description="Indexes of highlighted sentences",
     )
 
 
@@ -133,29 +152,37 @@ async def lifespan(app: FastAPI):
 
     # Initialize Qdrant client
     try:
-        qdrant_client = init_qdrant()
+        qdrant_client = await asyncio.wait_for(
+            asyncio.to_thread(init_qdrant),
+            timeout=INIT_QDRANT_TIMEOUT
+        )
         print("[INFO] Qdrant client initialized")
+    except asyncio.TimeoutError:
+        print(f"[ERROR] Qdrant initialization timed out after {INIT_QDRANT_TIMEOUT}s")
     except Exception as e:
         print(f"[ERROR] Failed to initialize Qdrant: {e}")
 
-    # Initialize embedding service client
-    try:
-        embedding_service = init_embedding_service()
-        print(f"[INFO] Embedding service client initialized")
-    except Exception as e:
-        print(f"[ERROR] Failed to initialize embedding service: {e}")
-
     # Initialize S3 clients for presigned URLs
     try:
-        init_s3_clients()
+        await asyncio.wait_for(
+            asyncio.to_thread(init_s3_clients),
+            timeout=INIT_S3_TIMEOUT
+        )
         print("[INFO] S3 clients initialized for presigned URL generation")
+    except asyncio.TimeoutError:
+        print(f"[WARN] S3 initialization timed out after {INIT_S3_TIMEOUT}s")
     except Exception as e:
         print(f"[WARN] S3 initialization failed (PDFs may not have presigned URLs): {e}")
 
     # Check collection stats
     try:
-        stats = get_collection_stats()
+        stats = await asyncio.wait_for(
+            asyncio.to_thread(get_collection_stats),
+            timeout=COLLECTION_STATS_TIMEOUT
+        )
         print(f"[INFO] Collection stats: {stats}")
+    except asyncio.TimeoutError:
+        print(f"[WARN] Collection stats timed out after {COLLECTION_STATS_TIMEOUT}s")
     except Exception as e:
         print(f"[WARN] Could not fetch collection stats: {e}")
 
@@ -194,7 +221,18 @@ app.add_middleware(
 async def health_check():
     """Health check endpoint."""
     try:
-        stats = get_collection_stats()
+        try:
+            stats = await asyncio.wait_for(
+                asyncio.to_thread(get_collection_stats),
+                timeout=COLLECTION_STATS_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            print(f"[WARN] Health check timed out after {COLLECTION_STATS_TIMEOUT}s")
+            raise HTTPException(
+                status_code=504,
+                detail=f"Health check timed out after {COLLECTION_STATS_TIMEOUT}s",
+            )
+        
         print(f"[DEBUG] Health check - stats: {stats}")
         
         if stats.get("status") == "error":
@@ -210,6 +248,8 @@ async def health_check():
             points_count=stats.get("points_count"),
             vector_size=stats.get("vector_size"),
         )
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[ERROR] Health check exception: {type(e).__name__}: {e}")
         raise HTTPException(
@@ -249,12 +289,23 @@ async def search_contracts(
       List of matching contract chunks with scores, metadata, and presigned PDF URLs.
     """
     try:
-        results, metadata = search(
-            query=q,
-            top_k=top_k,
-            document_name=document_name,
-            strategy=strategy,
-        )
+        try:
+            results, metadata = await asyncio.wait_for(
+                asyncio.to_thread(
+                    search,
+                    q,
+                    top_k,
+                    document_name,
+                    strategy,
+                ),
+                timeout=SEARCH_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            print(f"[ERROR] Search timed out after {SEARCH_TIMEOUT}s for query: {q}")
+            raise HTTPException(
+                status_code=504,
+                detail=f"Search operation timed out after {SEARCH_TIMEOUT}s",
+            )
 
         # Convert to SearchResult objects with presigned URLs
         search_results = []
@@ -278,6 +329,8 @@ async def search_contracts(
                     pdf_path=r["pdf_path"],
                     pdf_url=pdf_url,
                     source=r.get("source", ["embeddings"]),
+                    highlighted_sentences=r.get("highlighted_sentences", []),
+                    highlight_sentence_indexes=r.get("highlight_sentence_indexes", []),
                 )
             )
 
@@ -289,9 +342,12 @@ async def search_contracts(
             results=search_results,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"[ERROR] Search failed: {str(e)}")
         raise HTTPException(
-            status_code=400,
+            status_code=500,
             detail=f"Search failed: {str(e)}",
         )
 
@@ -306,12 +362,28 @@ async def list_documents() -> DocumentListResponse:
       List of document metadata including title, path, chunk count, and presigned URLs.
     """
     try:
-        qdrant_client = init_qdrant()
-        qdrant_documents = get_unique_documents(qdrant_client, "cuad_contracts")
+        try:
+            qdrant_client = await asyncio.wait_for(
+                asyncio.to_thread(init_qdrant),
+                timeout=INIT_QDRANT_TIMEOUT
+            )
+            qdrant_documents = await asyncio.wait_for(
+                asyncio.to_thread(get_unique_documents, qdrant_client, "cuad_contracts"),
+                timeout=DOCS_LIST_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            print(f"[ERROR] Document list operation timed out after {DOCS_LIST_TIMEOUT}s")
+            raise HTTPException(
+                status_code=504,
+                detail=f"Document list operation timed out after {DOCS_LIST_TIMEOUT}s",
+            )
 
         # Try to enrich with S3 presigned URLs
         try:
-            s3_documents = list_s3_documents()
+            s3_documents = await asyncio.wait_for(
+                asyncio.to_thread(list_s3_documents),
+                timeout=5
+            )
             
             # Create mapping of title -> S3 doc info
             s3_map = {doc["title"]: doc for doc in s3_documents}
@@ -328,7 +400,7 @@ async def list_documents() -> DocumentListResponse:
                     chunk_count=d["chunk_count"],
                     total_chars=d["total_chars"],
                 ))
-        except Exception as s3_error:
+        except (asyncio.TimeoutError, Exception) as s3_error:
             print(f"[WARN] Could not fetch S3 documents, returning Qdrant-only: {s3_error}")
             documents = [
                 DocumentMetadata(
@@ -345,7 +417,10 @@ async def list_documents() -> DocumentListResponse:
             total=len(documents),
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"[ERROR] Failed to list documents: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to list documents: {str(e)}",
@@ -363,12 +438,26 @@ async def get_document_detail(
       Document metadata, chunk information, and presigned PDF URL.
     """
     try:
-        qdrant_client = init_qdrant()
-        doc_info = get_document_info(
-            qdrant_client,
-            "cuad_contracts",
-            document_name,
-        )
+        try:
+            qdrant_client = await asyncio.wait_for(
+                asyncio.to_thread(init_qdrant),
+                timeout=INIT_QDRANT_TIMEOUT
+            )
+            doc_info = await asyncio.wait_for(
+                asyncio.to_thread(
+                    get_document_info,
+                    qdrant_client,
+                    "cuad_contracts",
+                    document_name,
+                ),
+                timeout=DOCS_DETAIL_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            print(f"[ERROR] Document detail operation timed out after {DOCS_DETAIL_TIMEOUT}s")
+            raise HTTPException(
+                status_code=504,
+                detail=f"Document detail operation timed out after {DOCS_DETAIL_TIMEOUT}s",
+            )
 
         if not doc_info:
             raise HTTPException(
@@ -385,6 +474,7 @@ async def get_document_detail(
     except HTTPException:
         raise
     except Exception as e:
+        print(f"[ERROR] Failed to get document details: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get document details: {str(e)}",

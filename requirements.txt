@@ -10,6 +10,8 @@ qdrant-client>=1.7.0
 # Embeddings & ML
 sentence-transformers>=2.2.0
 torch>=2.0.0
+transformers>=4.30.0
+datasets>=2.10.0
 
 # S3/MinIO & Object Storage
 boto3>=1.26.0
@@ -17,4 +19,6 @@ boto3>=1.26.0
 # Utilities
 tqdm>=4.66.0
 nltk>=3.8.0
+numpy>=1.24.0
+httpx>=0.24.0
 

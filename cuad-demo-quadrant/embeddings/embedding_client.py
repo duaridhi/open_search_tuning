@@ -70,6 +70,37 @@ class EmbeddingServiceClient:
         except Exception as e:
             raise ConnectionError(f"Cannot get info from embedding service: {e}")
     
+    def highlight(self, query: str, document: str) -> dict:
+        """
+        Get semantic highlights for a document given a query.
+        
+        Args:
+            query: Search query
+            document: Document text to highlight
+        
+        Returns:
+            Dict with highlighted_sentences (list) and highlight_sentence_indexes (list)
+        """
+        try:
+            response = self._get_client().post(
+                f"{self.base_url}/highlight",
+                json={"query": query, "document": document}
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"Highlighting service error: {e}")
+    
+    def highlight_ready(self) -> dict:
+        """Check if highlighter models are loaded in the service."""
+        try:
+            response = self._get_client().get(f"{self.base_url}/highlight-ready")
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            raise ConnectionError(f"Cannot check highlighter status from embedding service: {e}")
+    
     def close(self):
         """Close HTTP client connection."""
         if self._client is not None:

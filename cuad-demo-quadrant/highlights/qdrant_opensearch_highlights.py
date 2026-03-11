@@ -170,7 +170,7 @@ def prepare_input_features(
 def get_tokenizer():
     """Get tokenizer from embedding service global state."""
     try:
-        from ..embeddings.embedding_service import _state
+        from embeddings.embedding_service import _state
         tokenizer = _state.get("highlighter_tokenizer")
         if tokenizer is None:
             raise RuntimeError("Highlighter tokenizer not loaded in embedding service")
@@ -182,7 +182,7 @@ def get_tokenizer():
 def get_highlighter_model():
     """Get highlighter model from embedding service global state."""
     try:
-        from ..embeddings.embedding_service import _state
+        from embeddings.embedding_service import _state
         model = _state.get("highlighter_model")
         if model is None:
             raise RuntimeError("Highlighter model not loaded in embedding service")

@@ -1,0 +1,11 @@
+title: CUAD AI Demo Backend
+description: Semantic search over contract documents with PDF viewing and highlighting backend
+sdk: docker
+app_port: 7860
+models: []
+tags:
+  - semantic-search
+  - document-search
+  - pdf-viewer
+  - contract-analysis
+fullWidth: true

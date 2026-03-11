@@ -23,6 +23,16 @@ from transformers import AutoTokenizer, BertModel, BertPreTrainedModel
 # Load environment variables
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
+# Authenticate with Hugging Face Hub if token is available
+HF_TOKEN = os.getenv("HF_TOKEN")
+if HF_TOKEN:
+    try:
+        from huggingface_hub import login
+        login(token=HF_TOKEN)
+        print("[STARTUP] Authenticated with Hugging Face Hub")
+    except Exception as e:
+        print(f"[WARN] Failed to authenticate with Hugging Face Hub: {e}")
+
 # Configuration
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
 EMBEDDING_SERVICE_DEVICE = os.getenv("EMBEDDING_SERVICE_DEVICE", "cpu")
@@ -119,50 +129,92 @@ class BertTaggerForSentenceExtractionWithBackoff(BertPreTrainedModel):
 async def lifespan(app: FastAPI):
     try:
         print(f"[STARTUP] Loading SentenceTransformer model: {EMBEDDING_MODEL_NAME}")
-        try:
-            _state["model"] = await asyncio.wait_for(
-                asyncio.to_thread(
-                    SentenceTransformer,
-                    EMBEDDING_MODEL_NAME,
-                    device=EMBEDDING_SERVICE_DEVICE
-                ),
-                timeout=MODEL_LOAD_TIMEOUT
-            )
-            print("[STARTUP] SentenceTransformer model loaded successfully")
-        except asyncio.TimeoutError:
-            print(f"[ERROR] SentenceTransformer loading exceeded {MODEL_LOAD_TIMEOUT}s")
-            raise RuntimeError(f"Model loading timeout after {MODEL_LOAD_TIMEOUT}s")
-        except Exception as e:
-            print(f"[ERROR] Failed to load SentenceTransformer: {e}")
-            raise
+        model_loaded = False
+        for retry in range(3):
+            try:
+                print(f"[STARTUP] SentenceTransformer load attempt {retry + 1}/3...")
+                _state["model"] = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        SentenceTransformer,
+                        EMBEDDING_MODEL_NAME,
+                        device=EMBEDDING_SERVICE_DEVICE
+                    ),
+                    timeout=MODEL_LOAD_TIMEOUT
+                )
+                model_loaded = True
+                print("[STARTUP] SentenceTransformer model loaded successfully")
+                break
+            except asyncio.TimeoutError:
+                print(f"[WARN] SentenceTransformer loading attempt {retry + 1} timed out after {MODEL_LOAD_TIMEOUT}s")
+                if retry == 2:
+                    raise RuntimeError(f"SentenceTransformer loading timeout after 3 attempts")
+            except Exception as e:
+                print(f"[WARN] SentenceTransformer loading attempt {retry + 1} failed: {e}")
+                if retry == 2:
+                    raise RuntimeError(f"Failed to load SentenceTransformer: {e}")
+                await asyncio.sleep(2)  # Wait before retry
+        
+        if not model_loaded:
+            raise RuntimeError("SentenceTransformer model failed to load after all retry attempts")
         
         print(f"[STARTUP] Loading Highlighter model: {HIGHLIGHTER_MODEL_ID}")
-        try:
-            _state["highlighter_model"] = await asyncio.wait_for(
-                asyncio.to_thread(
-                    BertTaggerForSentenceExtractionWithBackoff.from_pretrained,
-                    HIGHLIGHTER_MODEL_ID
-                ),
-                timeout=MODEL_LOAD_TIMEOUT
-            )
-            _state["highlighter_model"].eval()
-            print("[STARTUP] Highlighter model loaded successfully")
-        except asyncio.TimeoutError:
-            print(f"[ERROR] Highlighter model loading exceeded {MODEL_LOAD_TIMEOUT}s")
-            raise RuntimeError(f"Highlighter model loading timeout after {MODEL_LOAD_TIMEOUT}s")
-        except Exception as e:
-            print(f"[ERROR] Failed to load highlighter model: {e}")
-            raise
+        model_loaded = False
+        for retry in range(3):
+            try:
+                print(f"[STARTUP] Highlighter model load attempt {retry + 1}/3...")
+                _state["highlighter_model"] = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        BertTaggerForSentenceExtractionWithBackoff.from_pretrained,
+                        HIGHLIGHTER_MODEL_ID,
+                        trust_remote_code=True
+                    ),
+                    timeout=MODEL_LOAD_TIMEOUT
+                )
+                _state["highlighter_model"].eval()
+                model_loaded = True
+                print("[STARTUP] Highlighter model loaded successfully")
+                break
+            except asyncio.TimeoutError:
+                print(f"[WARN] Highlighter model loading attempt {retry + 1} timed out after {MODEL_LOAD_TIMEOUT}s")
+                if retry == 2:
+                    raise RuntimeError(f"Highlighter model loading timeout after 3 attempts")
+            except Exception as e:
+                print(f"[WARN] Highlighter model loading attempt {retry + 1} failed: {e}")
+                if retry == 2:
+                    raise RuntimeError(f"Failed to load highlighter model: {e}")
+                await asyncio.sleep(2)  # Wait before retry
         
-        try:
-            _state["highlighter_tokenizer"] = await asyncio.to_thread(
-                AutoTokenizer.from_pretrained,
-                HIGHLIGHTER_BASE_MODEL_ID
-            )
-            print("[STARTUP] Highlighter tokenizer loaded successfully")
-        except Exception as e:
-            print(f"[ERROR] Failed to load highlighter tokenizer: {e}")
-            raise
+        if not model_loaded:
+            raise RuntimeError("Highlighter model failed to load after all retry attempts")
+        
+        print(f"[STARTUP] Loading Highlighter tokenizer: {HIGHLIGHTER_BASE_MODEL_ID}")
+        tokenizer_loaded = False
+        for retry in range(3):
+            try:
+                print(f"[STARTUP] Tokenizer load attempt {retry + 1}/3...")
+                _state["highlighter_tokenizer"] = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        AutoTokenizer.from_pretrained,
+                        HIGHLIGHTER_BASE_MODEL_ID,
+                        trust_remote_code=True
+                    ),
+                    timeout=MODEL_LOAD_TIMEOUT
+                )
+                tokenizer_loaded = True
+                print("[STARTUP] Highlighter tokenizer loaded successfully")
+                break
+            except asyncio.TimeoutError:
+                print(f"[WARN] Highlighter tokenizer loading attempt {retry + 1} timed out after {MODEL_LOAD_TIMEOUT}s")
+                if retry == 2:
+                    raise RuntimeError(f"Highlighter tokenizer loading timeout after 3 attempts")
+            except Exception as e:
+                print(f"[WARN] Highlighter tokenizer loading attempt {retry + 1} failed: {e}")
+                if retry == 2:
+                    raise RuntimeError(f"Failed to load highlighter tokenizer: {e}")
+                await asyncio.sleep(2)  # Wait before retry
+        
+        if not tokenizer_loaded:
+            raise RuntimeError("Highlighter tokenizer failed to load after all retry attempts")
         
         print("[STARTUP] Embedding service ready with both embedding and highlighting models")
         yield

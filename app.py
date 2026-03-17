@@ -26,7 +26,7 @@ from pathlib import Path as PathLib
 qdrant_dir = PathLib(__file__).parent / "cuad-demo-quadrant"
 sys.path.insert(0, str(qdrant_dir))
 
-from qdrant_search import (
+from qdrant_search_hf import (
     init_qdrant,
     search,
     get_collection_stats,

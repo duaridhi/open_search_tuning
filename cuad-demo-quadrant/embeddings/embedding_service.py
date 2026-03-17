@@ -127,12 +127,13 @@ class BertTaggerForSentenceExtractionWithBackoff(BertPreTrainedModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("[DEBUG] Entering lifespan startup sequence...")
     try:
-        print(f"[STARTUP] Loading SentenceTransformer model: {EMBEDDING_MODEL_NAME}")
+        print(f"[DEBUG] About to load SentenceTransformer model: {EMBEDDING_MODEL_NAME}")
         model_loaded = False
         for retry in range(3):
             try:
-                print(f"[STARTUP] SentenceTransformer load attempt {retry + 1}/3...")
+                print(f"[DEBUG] SentenceTransformer load attempt {retry + 1}/3...")
                 _state["model"] = await asyncio.wait_for(
                     asyncio.to_thread(
                         SentenceTransformer,
@@ -142,26 +143,28 @@ async def lifespan(app: FastAPI):
                     timeout=MODEL_LOAD_TIMEOUT
                 )
                 model_loaded = True
-                print("[STARTUP] SentenceTransformer model loaded successfully")
+                print("[DEBUG] SentenceTransformer model loaded successfully")
                 break
             except asyncio.TimeoutError:
                 print(f"[WARN] SentenceTransformer loading attempt {retry + 1} timed out after {MODEL_LOAD_TIMEOUT}s")
                 if retry == 2:
+                    print("[ERROR] SentenceTransformer loading timeout after 3 attempts")
                     raise RuntimeError(f"SentenceTransformer loading timeout after 3 attempts")
             except Exception as e:
                 print(f"[WARN] SentenceTransformer loading attempt {retry + 1} failed: {e}")
                 if retry == 2:
+                    print(f"[ERROR] Failed to load SentenceTransformer: {e}")
                     raise RuntimeError(f"Failed to load SentenceTransformer: {e}")
                 await asyncio.sleep(2)  # Wait before retry
-        
         if not model_loaded:
+            print("[ERROR] SentenceTransformer model failed to load after all retry attempts")
             raise RuntimeError("SentenceTransformer model failed to load after all retry attempts")
-        
-        print(f"[STARTUP] Loading Highlighter model: {HIGHLIGHTER_MODEL_ID}")
+
+        print(f"[DEBUG] About to load Highlighter model: {HIGHLIGHTER_MODEL_ID}")
         model_loaded = False
         for retry in range(3):
             try:
-                print(f"[STARTUP] Highlighter model load attempt {retry + 1}/3...")
+                print(f"[DEBUG] Highlighter model load attempt {retry + 1}/3...")
                 _state["highlighter_model"] = await asyncio.wait_for(
                     asyncio.to_thread(
                         BertTaggerForSentenceExtractionWithBackoff.from_pretrained,
@@ -172,26 +175,28 @@ async def lifespan(app: FastAPI):
                 )
                 _state["highlighter_model"].eval()
                 model_loaded = True
-                print("[STARTUP] Highlighter model loaded successfully")
+                print("[DEBUG] Highlighter model loaded successfully")
                 break
             except asyncio.TimeoutError:
                 print(f"[WARN] Highlighter model loading attempt {retry + 1} timed out after {MODEL_LOAD_TIMEOUT}s")
                 if retry == 2:
+                    print("[ERROR] Highlighter model loading timeout after 3 attempts")
                     raise RuntimeError(f"Highlighter model loading timeout after 3 attempts")
             except Exception as e:
                 print(f"[WARN] Highlighter model loading attempt {retry + 1} failed: {e}")
                 if retry == 2:
+                    print(f"[ERROR] Failed to load highlighter model: {e}")
                     raise RuntimeError(f"Failed to load highlighter model: {e}")
                 await asyncio.sleep(2)  # Wait before retry
-        
         if not model_loaded:
+            print("[ERROR] Highlighter model failed to load after all retry attempts")
             raise RuntimeError("Highlighter model failed to load after all retry attempts")
-        
-        print(f"[STARTUP] Loading Highlighter tokenizer: {HIGHLIGHTER_BASE_MODEL_ID}")
+
+        print(f"[DEBUG] About to load Highlighter tokenizer: {HIGHLIGHTER_BASE_MODEL_ID}")
         tokenizer_loaded = False
         for retry in range(3):
             try:
-                print(f"[STARTUP] Tokenizer load attempt {retry + 1}/3...")
+                print(f"[DEBUG] Tokenizer load attempt {retry + 1}/3...")
                 _state["highlighter_tokenizer"] = await asyncio.wait_for(
                     asyncio.to_thread(
                         AutoTokenizer.from_pretrained,
@@ -201,23 +206,33 @@ async def lifespan(app: FastAPI):
                     timeout=MODEL_LOAD_TIMEOUT
                 )
                 tokenizer_loaded = True
-                print("[STARTUP] Highlighter tokenizer loaded successfully")
+                print("[DEBUG] Highlighter tokenizer loaded successfully")
                 break
             except asyncio.TimeoutError:
                 print(f"[WARN] Highlighter tokenizer loading attempt {retry + 1} timed out after {MODEL_LOAD_TIMEOUT}s")
                 if retry == 2:
+                    print("[ERROR] Highlighter tokenizer loading timeout after 3 attempts")
                     raise RuntimeError(f"Highlighter tokenizer loading timeout after 3 attempts")
             except Exception as e:
                 print(f"[WARN] Highlighter tokenizer loading attempt {retry + 1} failed: {e}")
                 if retry == 2:
+                    print(f"[ERROR] Failed to load highlighter tokenizer: {e}")
                     raise RuntimeError(f"Failed to load highlighter tokenizer: {e}")
                 await asyncio.sleep(2)  # Wait before retry
-        
         if not tokenizer_loaded:
+            print("[ERROR] Highlighter tokenizer failed to load after all retry attempts")
             raise RuntimeError("Highlighter tokenizer failed to load after all retry attempts")
-        
-        print("[STARTUP] Embedding service ready with both embedding and highlighting models")
+
+        print("[DEBUG] Embedding service ready with both embedding and highlighting models")
         yield
+    except Exception as e:
+        print(f"[STARTUP FAILED - LIFESPAN] {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        print("[SHUTDOWN] Embedding service closing")
+        _state.clear()
         
     except Exception as e:
         print(f"[STARTUP FAILED] {e}")
@@ -362,72 +377,6 @@ def highlight_ready():
     }
 
 
-class HighlightRequest(BaseModel):
-    query: str
-    document: str
-
-
-class HighlightResponse(BaseModel):
-    highlighted_sentences: list[str]
-    highlight_sentence_indexes: list[int]
-    highlight_offsets: list[tuple[int, int]] = Field(
-        ..., 
-        description="Character offsets (start, end) for each highlighted sentence relative to document start"
-    )
-
-
-@app.post("/highlight", response_model=HighlightResponse)
-def highlight(request: HighlightRequest):
-    """
-    Highlight relevant sentences in a document using semantic highlighter.
-    
-    Args:
-        query: Search query
-        document: Document text to highlight
-    
-    Returns:
-        Highlighted sentences and their indexes
-    """
-    try:
-        if "highlighter_model" not in _state or "highlighter_tokenizer" not in _state:
-            raise HTTPException(
-                status_code=503,
-                detail="Highlighter models not loaded"
-            )
-        
-        if not request.query or not request.query.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="query cannot be empty"
-            )
-        
-        if not request.document or not request.document.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="document cannot be empty"
-            )
-        
-        # Use the qdrant_opensearch_highlights module to run highlighting
-        from highlights.qdrant_opensearch_highlights import highlight_document
-        
-        highlights = highlight_document(
-            query=request.query,
-            document=request.document
-        )
-        
-        return HighlightResponse(
-            highlighted_sentences=highlights.get("highlighted_sentences", []),
-            highlight_sentence_indexes=highlights.get("highlight_sentence_indexes", []),
-            highlight_offsets=highlights.get("highlight_offsets", [])
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[ERROR] Highlighting failed: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Highlighting error: {str(e)}")
 
 
 # --------- Helper Functions ---------
@@ -443,7 +392,6 @@ def get_highlighter_tokenizer():
 
 if __name__ == "__main__":
     import uvicorn
-    
     port = int(os.getenv("EMBEDDING_SERVICE_PORT", "8001"))
     host = os.getenv("EMBEDDING_SERVICE_HOST", "0.0.0.0")
     

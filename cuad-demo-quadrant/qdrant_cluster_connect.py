@@ -36,7 +36,7 @@ logger.info(f"Loading environment variables from: {env_path}");
 if env_path.exists():
     load_dotenv(env_path)
     logger.info(f"Path found: {env_path}");
-    
+
 
 
 
@@ -45,6 +45,7 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", None)
 QDRANT_CLUSTER_URL = os.getenv("CLUSTER_URL", None)  # For Qdrant Cloud
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+logger.info(f"Configuration - QDRANT_URL: {QDRANT_URL}, CLUSTER_URL: {QDRANT_CLUSTER_URL}, QDRANT_PORT: {QDRANT_PORT}")
 
 # Cached client (singleton)
 _qdrant_client: Optional[QdrantClient] = None

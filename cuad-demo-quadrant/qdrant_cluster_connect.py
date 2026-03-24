@@ -12,16 +12,31 @@ Handles:
 """
 
 import os
+import logging
 from typing import Optional
 from qdrant_client import QdrantClient
 from dotenv import load_dotenv
 from pathlib import Path
 
 
+# Logger Configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger(__name__)
+
+
 # Load environment variables from .env
 env_path = Path(__file__).resolve().parent / ".env"
+logger.info(f"Loading environment variables from: {env_path}");
 if env_path.exists():
     load_dotenv(env_path)
+
+
 
 # Configuration from environment
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -85,7 +100,7 @@ def init_qdrant_client(
     connection_url = url or _get_connection_url()
     api_token = api_key or QDRANT_API_KEY
 
-    print(f"[INFO] Connecting to Qdrant: {connection_url}")
+    logger.info(f"Connecting to Qdrant: {connection_url}")
 
     try:
         _qdrant_client = QdrantClient(
@@ -98,21 +113,21 @@ def init_qdrant_client(
         # Test connection
         collections = _qdrant_client.get_collections()
         collection_count = len(collections.collections) if collections else 0
-        print(f"[INFO] Qdrant connected successfully ({collection_count} collections found)")
+        logger.info(f"Qdrant connected successfully ({collection_count} collections found)")
 
         return _qdrant_client
 
     except Exception as e:
-        print(f"\n[ERROR] Failed to connect to Qdrant at {connection_url}")
-        print(f"[ERROR] Make sure Qdrant is running:")
-        print(f"[ERROR]")
-        print(f"[ERROR] For local deployment:")
-        print(f"[ERROR]   docker run -p 6333:6333 qdrant/qdrant:latest")
-        print(f"[ERROR]")
-        print(f"[ERROR] For Qdrant Cloud:")
-        print(f"[ERROR]   Set CLUSTER_URL and QDRANT_API_KEY in .env")
-        print(f"[ERROR]")
-        print(f"[ERROR] Error details: {type(e).__name__}: {e}")
+        logger.error(f"Failed to connect to Qdrant at {connection_url}")
+        logger.error(f"Make sure Qdrant is running:")
+        logger.error(f"")
+        logger.error(f"For local deployment:")
+        logger.error(f"  docker run -p 6333:6333 qdrant/qdrant:latest")
+        logger.error(f"")
+        logger.error(f"For Qdrant Cloud:")
+        logger.error(f"  Set CLUSTER_URL and QDRANT_API_KEY in .env")
+        logger.error(f"")
+        logger.error(f"Error details: {type(e).__name__}: {e}", exc_info=True)
         raise ConnectionError(
             f"Cannot connect to Qdrant at {connection_url}: {e}"
         ) from e
@@ -127,6 +142,7 @@ def get_qdrant_client() -> QdrantClient:
     """
     global _qdrant_client
     if _qdrant_client is None:
+        logger.debug("Initializing new Qdrant client")
         init_qdrant_client()
     return _qdrant_client
 
@@ -134,6 +150,7 @@ def get_qdrant_client() -> QdrantClient:
 def reset_client():
     """Reset cached client (useful for testing)."""
     global _qdrant_client
+    logger.debug("Resetting Qdrant client cache")
     _qdrant_client = None
 
 
@@ -144,11 +161,12 @@ def get_cluster_info() -> dict:
     Returns:
         Dict with cluster and connection info
     """
+    logger.debug("Fetching cluster information")
     try:
         client = get_qdrant_client()
         collections = client.get_collections()
-
-        return {
+        
+        info = {
             "status": "ok",
             "url": _get_connection_url(),
             "collections_count": len(collections.collections) if collections else 0,
@@ -156,7 +174,10 @@ def get_cluster_info() -> dict:
                 [c.name for c in collections.collections] if collections else []
             ),
         }
+        logger.info(f"Cluster info retrieved: {info['collections_count']} collections found")
+        return info
     except Exception as e:
+        logger.error(f"Failed to fetch cluster information: {e}", exc_info=True)
         return {
             "status": "error",
             "url": _get_connection_url(),

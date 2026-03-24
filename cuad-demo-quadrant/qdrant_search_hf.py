@@ -6,13 +6,17 @@ No local embedding service required.
 """
 
 import os
+from pathlib import Path
 from typing import Optional, Tuple
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 from qdrant_cluster_connect import get_qdrant_client, get_cluster_info
 
 from huggingface_hub import InferenceClient
 import requests
+from dotenv import load_dotenv
 
+env_path = Path(__file__).parent / ".env"
+load_dotenv(env_path)
 # Configuration
 COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "cuad_contracts")
 HF_TOKEN = os.getenv("HF_TOKEN")

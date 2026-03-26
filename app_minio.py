@@ -34,7 +34,7 @@ from qdrant_search_hf import (
 )
 from document_utils import get_unique_documents, get_document_info
 from qdrant_cluster_connect import get_cluster_info
-from hf_utils import init_hf_client, generate_hf_url, list_hf_documents
+from s3_utils import init_s3_clients, generate_presigned_url, list_s3_documents
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 # Timeout Configurations (in seconds)
 # ─────────────────────────────────────────────────────────────────────────────
 INIT_QDRANT_TIMEOUT = int(os.getenv("INIT_QDRANT_TIMEOUT", "30"))
-INIT_HF_TIMEOUT = int(os.getenv("INIT_HF_TIMEOUT", "10"))
+INIT_S3_TIMEOUT = int(os.getenv("INIT_S3_TIMEOUT", "10"))
 COLLECTION_STATS_TIMEOUT = int(os.getenv("COLLECTION_STATS_TIMEOUT", "10"))
 SEARCH_TIMEOUT = int(os.getenv("SEARCH_TIMEOUT", "60"))
 DOCS_LIST_TIMEOUT = int(os.getenv("DOCS_LIST_TIMEOUT", "20"))
@@ -87,7 +87,7 @@ class SearchResult(BaseModel):
     pdf_path: str = Field(..., description="Relative path to PDF")
     pdf_url: Optional[str] = Field(
         None,
-        description="HuggingFace Hub URL for PDF download",
+        description="Presigned URL for PDF download",
     )
     source: list[str] = Field(
         default=["embeddings"],
@@ -118,13 +118,13 @@ class DocumentMetadata(BaseModel):
 
     title: str = Field(..., description="Contract title/name")
     pdf_path: str = Field(..., description="Path to PDF file")
-    hf_path: Optional[str] = Field(
+    s3_key: Optional[str] = Field(
         None,
-        description="HuggingFace Hub path for PDF",
+        description="S3 object key for PDF",
     )
     pdf_url: Optional[str] = Field(
         None,
-        description="HuggingFace Hub URL for PDF download",
+        description="Presigned URL for PDF download",
     )
     chunk_count: int = Field(..., description="Number of chunks")
     total_chars: int = Field(..., description="Total characters")
@@ -176,17 +176,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize Qdrant: {e}", exc_info=True)
 
-    # Initialize HuggingFace Hub client for document URLs
+    # Initialize S3 clients for presigned URLs
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(init_hf_client),
-            timeout=INIT_HF_TIMEOUT
+            asyncio.to_thread(init_s3_clients),
+            timeout=INIT_S3_TIMEOUT
         )
-        logger.info("HuggingFace Hub client initialized for document URL generation")
+        logger.info("S3 clients initialized for presigned URL generation")
     except asyncio.TimeoutError:
-        logger.warning(f"HuggingFace Hub initialization timed out after {INIT_HF_TIMEOUT}s")
+        logger.warning(f"S3 initialization timed out after {INIT_S3_TIMEOUT}s")
     except Exception as e:
-        logger.warning(f"HuggingFace Hub initialization failed (PDFs may not have URLs): {e}", exc_info=True)
+        logger.warning(f"S3 initialization failed (PDFs may not have presigned URLs): {e}", exc_info=True)
 
     # Check collection stats
     try:
@@ -301,7 +301,7 @@ async def search_contracts(
       - strategy: Search strategy (semantic_search or hybrid_search)
 
     Returns:
-      List of matching contract chunks with scores, metadata, and HuggingFace Hub PDF URLs.
+      List of matching contract chunks with scores, metadata, and presigned PDF URLs.
     """
     logger.info(f"Search request: query='{q}', top_k={top_k}, document_name={document_name}, strategy={strategy}")
     try:
@@ -323,12 +323,12 @@ async def search_contracts(
                 detail=f"Search operation timed out after {SEARCH_TIMEOUT}s",
             )
 
-        # Convert to SearchResult objects with HuggingFace Hub URLs
+        # Convert to SearchResult objects with presigned URLs
         search_results = []
         for r in results:
-            # Generate HF Hub URL: format is "raw/{title}.pdf"
-            hf_path = f"raw/{r['title']}.pdf"
-            pdf_url = generate_hf_url(hf_path)
+            # Generate presigned URL: format is "raw/{title}.pdf"
+            s3_key = f"raw/{r['title']}.pdf"
+            pdf_url = generate_presigned_url(s3_key)
             
             search_results.append(
                 SearchResult(
@@ -373,10 +373,10 @@ async def search_contracts(
 async def list_documents() -> DocumentListResponse:
     """
     List all indexed documents (contracts) in the Qdrant collection.
-    Each document includes a HuggingFace Hub URL for direct PDF download.
+    Each document includes a presigned URL for direct PDF download.
 
     Returns:
-      List of document metadata including title, path, chunk count, and HF Hub URLs.
+      List of document metadata including title, path, chunk count, and presigned URLs.
     """
     logger.info("Document list request received")
     try:
@@ -396,31 +396,31 @@ async def list_documents() -> DocumentListResponse:
                 detail=f"Document list operation timed out after {DOCS_LIST_TIMEOUT}s",
             )
 
-        # Try to enrich with HuggingFace Hub URLs
+        # Try to enrich with S3 presigned URLs
         try:
-            hf_documents = await asyncio.wait_for(
-                asyncio.to_thread(list_hf_documents),
+            s3_documents = await asyncio.wait_for(
+                asyncio.to_thread(list_s3_documents),
                 timeout=5
             )
             
-            # Create mapping of title -> HF doc info
-            hf_map = {doc["title"]: doc for doc in hf_documents}
+            # Create mapping of title -> S3 doc info
+            s3_map = {doc["title"]: doc for doc in s3_documents}
             
-            # Combine Qdrant metadata with HF URLs
+            # Combine Qdrant metadata with S3 URLs
             documents = []
             for d in qdrant_documents:
-                hf_info = hf_map.get(d["title"], {})
+                s3_info = s3_map.get(d["title"], {})
                 documents.append(DocumentMetadata(
                     title=d["title"],
                     pdf_path=d["pdf_path"],
-                    hf_path=hf_info.get("hf_path"),
-                    pdf_url=hf_info.get("pdf_url"),
+                    s3_key=s3_info.get("s3_key"),
+                    pdf_url=s3_info.get("pdf_url"),
                     chunk_count=d["chunk_count"],
                     total_chars=d["total_chars"],
                 ))
-            logger.info(f"Retrieved {len(documents)} documents from Qdrant with HuggingFace Hub URLs")
-        except (asyncio.TimeoutError, Exception) as hf_error:
-            logger.warning(f"Could not fetch HuggingFace Hub documents, returning Qdrant-only: {hf_error}", exc_info=True)
+            logger.info(f"Retrieved {len(documents)} documents from Qdrant with S3 URLs")
+        except (asyncio.TimeoutError, Exception) as s3_error:
+            logger.warning(f"Could not fetch S3 documents, returning Qdrant-only: {s3_error}", exc_info=True)
             documents = [
                 DocumentMetadata(
                     title=d["title"],
@@ -430,7 +430,7 @@ async def list_documents() -> DocumentListResponse:
                 )
                 for d in qdrant_documents
             ]
-            logger.info(f"Retrieved {len(documents)} documents from Qdrant without HuggingFace Hub URLs")
+            logger.info(f"Retrieved {len(documents)} documents from Qdrant without S3 URLs")
 
         return DocumentListResponse(
             documents=documents,
@@ -455,7 +455,7 @@ async def get_document_detail(
     Get detailed information about a specific document.
 
     Returns:
-      Document metadata, chunk information, and HuggingFace Hub PDF URL.
+      Document metadata, chunk information, and presigned PDF URL.
     """
     logger.info(f"Document detail request for: '{document_name}'")
     try:
@@ -525,3 +525,5 @@ async def root():
 # ──────────────────────────────────────────────────────────────────────────────
 # Run with: uvicorn app:app --reload --host 0.0.0.0 --port 8000
 # ──────────────────────────────────────────────────────────────────────────────
+
+

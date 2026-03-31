@@ -4,10 +4,13 @@ document_utils.py
 Utilities for document discovery and metadata from Qdrant collection.
 """
 
+import logging
 import os
 from typing import Optional, List, Dict
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
+
+logger = logging.getLogger(__name__)
 
 
 def get_unique_documents(client: QdrantClient, collection_name: str) -> List[Dict]:
@@ -21,9 +24,8 @@ def get_unique_documents(client: QdrantClient, collection_name: str) -> List[Dic
         # Check if collection exists
         try:
             collection_info = client.get_collection(collection_name)
-            print(f"[DEBUG] Collection '{collection_name}' has {collection_info.points_count} points")
         except Exception as e:
-            print(f"[ERROR] Collection '{collection_name}' not found: {e}")
+            logger.error("Collection '%s' not found: %s", collection_name, e)
             return []
 
         # Retrieve all points (with pagination if collection is large)
@@ -33,8 +35,6 @@ def get_unique_documents(client: QdrantClient, collection_name: str) -> List[Dic
             with_payload=True,
             with_vectors=False,
         )
-
-        print(f"[DEBUG] Retrieved {len(scroll_results)} points from collection")
 
         # Aggregate by title to get unique documents
         doc_map: Dict[str, Dict] = {}
@@ -62,7 +62,7 @@ def get_unique_documents(client: QdrantClient, collection_name: str) -> List[Dic
         return documents
 
     except Exception as e:
-        print(f"[ERROR] Failed to get documents: {e}")
+        logger.error("Failed to get documents: %s", e)
         return []
 
 

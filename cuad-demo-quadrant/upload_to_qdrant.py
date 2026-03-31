@@ -27,6 +27,7 @@ Optional env vars
     UPLOAD_BATCH_SIZE– upsert batch size       (default: 100)
 """
 
+import logging
 import os
 import sys
 import uuid
@@ -40,7 +41,14 @@ from tqdm import tqdm
 # Import cluster connection
 from qdrant_cluster_connect import get_qdrant_client
 
-print("[INFO] Imports loaded successfully.")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s – %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+logger.info("Imports loaded successfully.")
 
 # %% Configuration — load .env and set constants
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -59,13 +67,12 @@ PDF_ROOT = Path(
     "/cuad_opensearch/cuad_data/CUAD_v1/full_contract_pdf"
 )
 
-print(f"[INFO] Config loaded:")
-print(f"       COLLECTION_NAME  = {COLLECTION_NAME}")
-print(f"       VECTOR_SIZE      = {VECTOR_SIZE}")
-print(f"       MAX_DOCS         = {MAX_DOCS}")
-print(f"       CHUNK_SIZE       = {CHUNK_SIZE}  |  CHUNK_OVERLAP = {CHUNK_OVERLAP}")
-print(f"       ENCODE_BATCH_SIZE= {ENCODE_BATCH_SIZE}  |  UPLOAD_BATCH_SIZE = {UPLOAD_BATCH_SIZE}")
-print(f"       PDF_ROOT exists  = {PDF_ROOT.exists()}")
+logger.info(
+    "Config loaded: COLLECTION=%s  VECTOR_SIZE=%d  MAX_DOCS=%d  "
+    "CHUNK_SIZE=%d  CHUNK_OVERLAP=%d  ENCODE_BATCH=%d  UPLOAD_BATCH=%d  PDF_ROOT_EXISTS=%s",
+    COLLECTION_NAME, VECTOR_SIZE, MAX_DOCS,
+    CHUNK_SIZE, CHUNK_OVERLAP, ENCODE_BATCH_SIZE, UPLOAD_BATCH_SIZE, PDF_ROOT.exists(),
+)
 
 
 # %% PDF extraction backend — auto-selects best available library
@@ -80,10 +87,10 @@ def _make_extractor():
                     pages.append({"page": i + 1, "text": page.get_text("text") or ""})
             return pages
 
-        print("[DEBUG] PDF backend selected: pymupdf (fitz)")
+        logger.info("PDF backend selected: pymupdf (fitz)")
         return "pymupdf", _extract
     except ImportError:
-        print("[DEBUG] pymupdf not available, trying pdfplumber …")
+        logger.debug("pymupdf not available, trying pdfplumber ...")
 
     try:
         import pdfplumber
@@ -95,10 +102,10 @@ def _make_extractor():
                     pages.append({"page": i + 1, "text": page.extract_text() or ""})
             return pages
 
-        print("[DEBUG] PDF backend selected: pdfplumber")
+        logger.info("PDF backend selected: pdfplumber")
         return "pdfplumber", _extract
     except ImportError:
-        print("[DEBUG] pdfplumber not available, trying pdfminer …")
+        logger.debug("pdfplumber not available, trying pdfminer ...")
 
     try:
         from pdfminer.high_level import extract_pages
@@ -115,7 +122,7 @@ def _make_extractor():
                 pages.append({"page": i + 1, "text": text})
             return pages
 
-        print("[DEBUG] PDF backend selected: pdfminer")
+        logger.info("PDF backend selected: pdfminer")
         return "pdfminer", _extract
     except ImportError:
         pass
@@ -124,7 +131,7 @@ def _make_extractor():
 
 
 EXTRACTOR_NAME, extract_pages_from_pdf = _make_extractor()
-print(f"[INFO] PDF extractor : {EXTRACTOR_NAME}")
+logger.info("PDF extractor: %s", EXTRACTOR_NAME)
 
 
 # %% Text chunking helpers
@@ -198,24 +205,22 @@ def iter_chunks(all_pdfs: list[Path], limit: int):
         if count >= limit:
             return
         title = pdf_path.stem
-        print(f"[DEBUG] Extracting: {pdf_path.name}", end="\r")
         try:
             pages = extract_pages_from_pdf(pdf_path)
         except Exception as exc:
-            print(f"\n[WARN] Could not extract {pdf_path.name}: {exc}")
+            logger.warning("Could not extract %s: %s", pdf_path.name, exc)
             skipped_pdfs += 1
             continue
 
         pages = [p for p in pages if p["text"].strip()]
         if not pages:
-            print(f"[WARN] No text extracted from {pdf_path.name} — skipping")
+            logger.warning("No text extracted from %s — skipping", pdf_path.name)
             skipped_pdfs += 1
             continue
 
         full_text = "\n\n".join(p["text"] for p in pages)
         page_map  = build_page_map(pages)
         rel_path  = str(pdf_path.relative_to(PDF_ROOT))
-        print(f"[DEBUG] {title}: {len(pages)} pages, {len(full_text):,} chars", end="\r")
 
         for chunk_idx, chunk in enumerate(
             split_text_with_offsets(full_text, CHUNK_SIZE, CHUNK_OVERLAP)
@@ -246,23 +251,22 @@ def iter_chunks(all_pdfs: list[Path], limit: int):
             count += 1
 
     if skipped_pdfs:
-        print(f"\n[INFO] PDFs skipped due to extraction errors: {skipped_pdfs}")
+        logger.warning("PDFs skipped due to extraction errors: %d", skipped_pdfs)
 
 
 # %% Connect to Qdrant and create collection if needed
 qdrant = get_qdrant_client()
-print("[INFO] Qdrant client initialized.")
+logger.info("Qdrant client initialized.")
 
 existing = [c.name for c in qdrant.get_collections().collections]
-print(f"[DEBUG] Existing collections: {existing}")
 if COLLECTION_NAME in existing:
-    print(f"[INFO] Collection '{COLLECTION_NAME}' already exists — skipping creation.")
+    logger.info("Collection '%s' already exists — skipping creation.", COLLECTION_NAME)
 else:
     qdrant.create_collection(
         collection_name=COLLECTION_NAME,
         vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
     )
-    print(f"[INFO] Collection '{COLLECTION_NAME}' created (dim={VECTOR_SIZE}, distance=Cosine).")
+    logger.info("Collection '%s' created (dim=%d, distance=Cosine).", COLLECTION_NAME, VECTOR_SIZE)
 
 try:
     qdrant.create_payload_index(
@@ -270,23 +274,23 @@ try:
         field_name="title",
         field_schema=PayloadSchemaType.KEYWORD,
     )
-    print(f"[INFO] Keyword index ensured on {COLLECTION_NAME}.title")
+    logger.info("Keyword index ensured on %s.title", COLLECTION_NAME)
 except Exception as exc:
-    print(f"[WARN] Could not create keyword index on {COLLECTION_NAME}.title: {exc}")
+    logger.warning("Could not create keyword index on %s.title: %s", COLLECTION_NAME, exc)
 
 
 # %% Load embedding model
 # NOTE: first run downloads ~90 MB from HuggingFace — this can take a minute.
 #       Subsequent runs load from the local cache and are fast.
-print("[INFO] Loading embedding model all-MiniLM-L6-v2 (downloading if not cached) …")
+logger.info("Loading embedding model all-MiniLM-L6-v2 (downloading if not cached) ...")
 model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
-print(f"[INFO] Model loaded. Max sequence length: {model.max_seq_length} tokens.")
+logger.info("Model loaded. Max sequence length: %d tokens.", model.max_seq_length)
 
 
 # %% Discover PDFs
 all_pdfs = find_pdfs(PDF_ROOT)
-print(f"[INFO] PDFs discovered : {len(all_pdfs)}")
-print(f"[INFO] Target chunks   : {MAX_DOCS}  |  chunk_size={CHUNK_SIZE}  overlap={CHUNK_OVERLAP}")
+logger.info("PDFs discovered: %d  |  target chunks: %d  chunk_size=%d  overlap=%d",
+            len(all_pdfs), MAX_DOCS, CHUNK_SIZE, CHUNK_OVERLAP)
 if not all_pdfs:
     raise FileNotFoundError(f"No PDFs found under {PDF_ROOT}. Check PDF_ROOT path.")
 
@@ -298,14 +302,12 @@ errors   = 0
 def flush_buffer(buf: list[dict]) -> int:
     """Encode and upsert a batch; returns number of points uploaded."""
     texts      = [d["text"] for d in buf]
-    print(f"[DEBUG] Encoding batch of {len(texts)} chunks …", end="\r")
     embeddings = model.encode(
         texts,
         batch_size=ENCODE_BATCH_SIZE,
         show_progress_bar=False,
         normalize_embeddings=True,
     )
-    print(f"[DEBUG] Embeddings shape: {embeddings.shape}  — upserting …", end="\r")
     points = [
         PointStruct(
             id=str(uuid.uuid5(uuid.NAMESPACE_DNS, d["doc_id"])),
@@ -337,33 +339,31 @@ with tqdm(total=MAX_DOCS, desc="Uploading chunks", unit="chunk") as pbar:
                 n = flush_buffer(chunk_buffer)
                 uploaded += n
                 pbar.update(n)
-                print(f"[INFO] Batch upserted — total uploaded so far: {uploaded}", end="\r")
             except Exception as exc:
-                print(f"\n[ERROR] Upsert failed: {exc}")
+                logger.error("Upsert failed: %s", exc)
                 errors += 1
             chunk_buffer.clear()
 
     # Flush remainder
     if chunk_buffer:
-        print(f"\n[INFO] Flushing final batch of {len(chunk_buffer)} chunks …")
+        logger.info("Flushing final batch of %d chunks ...", len(chunk_buffer))
         try:
             n = flush_buffer(chunk_buffer)
             uploaded += n
             pbar.update(n)
         except Exception as exc:
-            print(f"\n[ERROR] Final upsert failed: {exc}")
+            logger.error("Final upsert failed: %s", exc)
             errors += 1
         chunk_buffer.clear()
 
 
 # %% Summary
 info = qdrant.get_collection(COLLECTION_NAME)
-print("\n====== UPLOAD COMPLETE ======")
-print(f"[INFO] Collection      : {COLLECTION_NAME}")
-print(f"[INFO] Chunks uploaded : {uploaded}")
-print(f"[INFO] Errors          : {errors}")
-print(f"[INFO] Vectors in coll.: {info.points_count}")
+logger.info(
+    "Upload complete — collection: %s  chunks_uploaded: %d  errors: %d  vectors_in_collection: %s",
+    COLLECTION_NAME, uploaded, errors, info.points_count,
+)
 if errors:
-    print(f"[WARN] {errors} batch(es) failed — check [ERROR] lines above.")
+    logger.warning("%d batch(es) failed — check error logs above.", errors)
 
 # %%

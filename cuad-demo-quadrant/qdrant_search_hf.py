@@ -5,7 +5,9 @@ Qdrant search backend using HuggingFace Inference API for embeddings and highlig
 No local embedding service required.
 """
 
+import logging
 import os
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 from qdrant_client.models import Filter, FieldCondition, MatchValue
@@ -14,6 +16,8 @@ from qdrant_cluster_connect import get_qdrant_client, get_cluster_info
 from huggingface_hub import InferenceClient
 import requests
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 env_path = Path(__file__).parent / ".env"
 load_dotenv(env_path)
@@ -27,7 +31,7 @@ if not HF_TOKEN:
 	raise RuntimeError("HF_TOKEN environment variable must be set for HuggingFace Inference API.")
 
 # Initialize inference client
-print(f"[INFO] Initializing HuggingFace Inference client")
+logger.info("Initializing HuggingFace Inference client")
 client = InferenceClient(provider="hf-inference", api_key=HF_TOKEN)
 
 def init_qdrant():
@@ -39,11 +43,12 @@ def get_client():
 def embed_query(query: str) -> list[float]:
 	try:
 		# Use HuggingFace Inference API for embeddings
+		_t0 = time.perf_counter()
 		response = client.feature_extraction(
 			query,
 			model=EMBEDDING_MODEL_NAME,
 		)
-		print(f"[DEBUG] Raw embedding response from HF Inference API: {response}")
+		logger.info("HuggingFace feature extraction API responded in %.2fs", time.perf_counter() - _t0)
 		# Accept both a flat list (single embedding) and a list of lists (batch), handle numpy types
 		import numpy as np
 		def to_float_list(arr):
@@ -63,7 +68,7 @@ def embed_query(query: str) -> list[float]:
 				return to_float_list(response[0])
 		raise RuntimeError(f"Empty or invalid embedding response from HF Inference API: {response}")
 	except Exception as e:
-		print(f"[ERROR] Failed to embed query via HF Inference API: {e}")
+		logger.error("Failed to embed query via HF Inference API: %s", e)
 		raise
 
 def highlight_text(query: str, document: str):
@@ -82,22 +87,17 @@ def highlight_text(query: str, document: str):
 		if not sentences:
 			return {"highlighted_sentences": [], "highlight_sentence_indexes": [], "highlight_offsets": []}
 		
-		print(f"[DEBUG] Split document into {len(sentences)} sentences for reranking")
-		
 		# Score each sentence using the reranker
 		sentence_scores = []
+		_reranker_t0 = time.perf_counter()
 		
 		for i, sentence in enumerate(sentences):
 			try:
 				# Use HF Inference API text_classification with the reranker model
-				print(f"[DEBUG] Scoring sentence {i+1}/{len(sentences)}: {sentence[:50]}...")
-				
 				result = client.text_classification(
 					f"{query} [SEP] {sentence}",
 					model=RERANKER_MODEL_ID,
 				)
-				
-				print(f"[DEBUG] Reranker result for sentence {i+1}: {result}")
 				
 				# Extract the relevance score
 				# The model returns a list with label and score
@@ -109,10 +109,14 @@ def highlight_text(query: str, document: str):
 				sentence_scores.append(score)
 				
 			except Exception as e:
-				print(f"[WARN] Failed to score sentence {i+1}: {e}")
+				logger.warning("Failed to score sentence %d: %s", i + 1, e)
 				sentence_scores.append(0.0)
 		
-		print(f"[DEBUG] Sentence scores: {sentence_scores}")
+		logger.info(
+			"HuggingFace reranker API scored %d sentences in %.2fs",
+			len(sentences),
+			time.perf_counter() - _reranker_t0,
+		)
 		
 		# Find top-scoring sentences (above threshold)
 		threshold = 0.5
@@ -147,7 +151,6 @@ def highlight_text(query: str, document: str):
 				highlight_offsets.append((start, end))
 		
 		avg_score = np.mean([s[2] for s in highlighted_pairs]) if highlighted_pairs else 0.0
-		print(f"[DEBUG] Highlighted {len(highlighted_sentences)} sentences with avg score: {avg_score:.3f}")
 		
 		return {
 			"highlighted_sentences": highlighted_sentences,
@@ -156,9 +159,7 @@ def highlight_text(query: str, document: str):
 		}
 		
 	except Exception as e:
-		print(f"[WARN] Failed to highlight using reranker: {e}")
-		import traceback
-		traceback.print_exc()
+		logger.warning("Failed to highlight using reranker: %s", e)
 		return {"highlighted_sentences": [], "highlight_sentence_indexes": [], "highlight_offsets": []}
 
 def semantic_search(
@@ -175,7 +176,6 @@ def semantic_search(
 			search_filter = Filter(
 				must=[FieldCondition(key="title", match=MatchValue(value=document_name))]
 			)
-		print(f"[DEBUG] Searching Qdrant collection '{COLLECTION_NAME}'...")
 		search_results = client_qdrant.query_points(
 			collection_name=COLLECTION_NAME,
 			query=query_embedding,
@@ -183,7 +183,6 @@ def semantic_search(
 			limit=top_k,
 			with_payload=True,
 		)
-		print(f"[DEBUG] Found {len(search_results.points)} results")
 		results = []
 		for point in search_results.points:
 			if point.score >= min_score:
@@ -230,7 +229,7 @@ def semantic_search(
 		}
 		return results, metadata
 	except Exception as e:
-		print(f"[ERROR] Search error: {type(e).__name__}: {e}")
+		logger.error("Search error: %s: %s", type(e).__name__, e)
 		raise
 
 def hybrid_search(
@@ -257,9 +256,7 @@ def search(
 def get_collection_stats() -> dict:
 	try:
 		client = get_client()
-		print(f"[DEBUG] Fetching stats for collection: {COLLECTION_NAME}")
 		collection_info = client.get_collection(COLLECTION_NAME)
-		print(f"[DEBUG] Collection info retrieved: {collection_info}")
 		points_count = getattr(collection_info, "points_count", 0)
 		vector_size = None
 		distance = None
@@ -277,7 +274,7 @@ def get_collection_stats() -> dict:
 							vector_size = getattr(vectors_config, "size", None)
 							distance = getattr(vectors_config, "distance", None)
 		except Exception as e:
-			print(f"[DEBUG] Could not extract vector config: {e}")
+			logger.debug("Could not extract vector config: %s", e)
 		return {
 			"collection": COLLECTION_NAME,
 			"points_count": points_count,
@@ -286,9 +283,7 @@ def get_collection_stats() -> dict:
 			"status": "ready" if points_count is not None else "ready",
 		}
 	except Exception as e:
-		print(f"[ERROR] Failed to get collection stats: {type(e).__name__}: {e}")
-		import traceback
-		traceback.print_exc()
+		logger.error("Failed to get collection stats: %s: %s", type(e).__name__, e)
 		return {
 			"collection": COLLECTION_NAME,
 			"status": "error",

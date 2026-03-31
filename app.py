@@ -33,6 +33,7 @@ from qdrant_search_hf import (
     get_collection_stats,
 )
 from document_utils import get_unique_documents, get_document_info
+from chat_hf import chat
 from qdrant_cluster_connect import get_cluster_info
 from hf_utils import init_hf_client, generate_hf_url, list_hf_documents
 
@@ -41,7 +42,7 @@ from hf_utils import init_hf_client, generate_hf_url, list_hf_documents
 # Logger Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.INFO,
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
@@ -502,6 +503,102 @@ async def get_document_detail(
             status_code=500,
             detail=f"Failed to get document details: {str(e)}",
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat Endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+CHAT_TIMEOUT = int(os.getenv("CHAT_TIMEOUT", "120"))
+
+
+class ChatRequest(BaseModel):
+    query: str = Field(..., description="User question", min_length=1)
+    top_k: int = Field(5, description="Number of search results to use as context", ge=1, le=20)
+    document_name: Optional[str] = Field(None, description="Filter search to a specific contract")
+    strategy: str = Field("semantic_search", description="Search strategy")
+    system_prompt: Optional[str] = Field(None, description="Override default system instructions")
+
+
+class ChatResponse(BaseModel):
+    query: str
+    answer: str
+    document_name: Optional[str] = Field(None, description="Document name used to scope the search, if provided")
+    sources: list[SearchResult] = Field(default=[], description="Chunks used as context, with full metadata and highlights")
+
+
+@app.post("/chat", response_model=ChatResponse, tags=["Chat"])
+async def chat_endpoint(request: ChatRequest) -> ChatResponse:
+    """
+    Answer a question using RAG: retrieves top-k contract passages from Qdrant
+    then generates a grounded answer via HuggingFace Inference API.
+    """
+    logger.info(f"Chat request: query='{request.query}', top_k={request.top_k}")
+    try:
+        try:
+            results, _ = await asyncio.wait_for(
+                asyncio.to_thread(
+                    search,
+                    request.query,
+                    request.top_k,
+                    request.document_name,
+                    request.strategy,
+                ),
+                timeout=SEARCH_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail=f"Search timed out after {SEARCH_TIMEOUT}s",
+            )
+
+        try:
+            answer = await asyncio.wait_for(
+                asyncio.to_thread(chat, request.query, results, request.system_prompt),
+                timeout=CHAT_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail=f"Chat generation timed out after {CHAT_TIMEOUT}s",
+            )
+
+        sources = []
+        for r in results:
+            hf_path = f"raw/{r['title']}.pdf"
+            pdf_url = generate_hf_url(hf_path)
+            sources.append(
+                SearchResult(
+                    id=r["id"],
+                    score=r["score"],
+                    title=r["title"],
+                    text=r["text"],
+                    page_start=r["page_start"],
+                    page_end=r["page_end"],
+                    char_start=r["char_start"],
+                    char_end=r["char_end"],
+                    page_offset_start=r.get("page_offset_start"),
+                    page_offset_end=r.get("page_offset_end"),
+                    pdf_path=r["pdf_path"],
+                    pdf_url=pdf_url,
+                    source=r.get("source", ["embeddings"]),
+                    highlighted_sentences=r.get("highlighted_sentences", []),
+                    highlight_sentence_indexes=r.get("highlight_sentence_indexes", []),
+                )
+            )
+        logger.info(f"Chat answered query '{request.query}' using {len(results)} passages")
+        return ChatResponse(
+            query=request.query,
+            answer=answer,
+            document_name=request.document_name,
+            sources=sources,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Chat failed for query '{request.query}': {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
 
 @app.get("/", tags=["Info"])

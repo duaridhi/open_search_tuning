@@ -4,11 +4,14 @@ Manages loading and caching of highlighter models for use in both
 the main app and as fallback if the embedding service is unavailable.
 """
 
+import logging
 import os
 from functools import lru_cache
 from transformers import AutoTokenizer, BertPreTrainedModel, BertModel
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 # Model configuration
 HIGHLIGHTER_MODEL_ID = os.getenv("HIGHLIGHTER_MODEL_ID", "opensearch-project/opensearch-semantic-highlighter-v1")
@@ -110,7 +113,7 @@ def get_highlighter_model_impl():
     if _models["highlighter_model"] is not None:
         return _models["highlighter_model"]
     # Fallback: load on demand (should not happen if app startup succeeded)
-    print("[WARN] Highlighter model not pre-loaded, loading on demand...")
+    logger.warning("Highlighter model not pre-loaded, loading on demand...")
     model = BertTaggerForSentenceExtractionWithBackoff.from_pretrained(HIGHLIGHTER_MODEL_ID)
     model.eval()
     _models["highlighter_model"] = model

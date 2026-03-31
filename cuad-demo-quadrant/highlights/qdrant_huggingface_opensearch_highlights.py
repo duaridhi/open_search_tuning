@@ -281,13 +281,13 @@ if __name__ == "__main__":
         Both parties must provide 30 days notice before any action.
         """
         
-        print("Testing HF highlighting...")
+        logger.info("Testing HF highlighting...")
         highlighted, indices = highlight_text(test_text)
-        print(f"Highlighted sentences: {highlighted}")
-        print(f"Indices: {indices}")
+        logger.info("Highlighted sentences: %s", highlighted)
+        logger.info("Indices: %s", indices)
         
-        print("\nTesting top sentences...")
+        logger.info("Testing top sentences...")
         top = get_top_sentences(test_text, top_k=2)
-        print(f"Top sentences: {top}")
+        logger.info("Top sentences: %s", top)
     else:
-        print("Failed to initialize HF client")
+        logger.error("Failed to initialize HF client")

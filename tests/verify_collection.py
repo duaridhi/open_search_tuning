@@ -11,12 +11,20 @@ Usage
     python tests/verify_collection.py
 """
 
+import logging
 import os
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s – %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables from parent directory's .env
 env_path = Path(__file__).resolve().parent.parent / "cuad-demo-quadrant" / ".env"
@@ -28,10 +36,10 @@ CLUSTER_URL = os.environ.get("CLUSTER_URL", "").strip()
 COLLECTION_NAME = "cuad_contracts"
 
 if not QDRANT_API_KEY or not CLUSTER_URL:
-    print("[ERROR] Missing QDRANT_API_KEY or CLUSTER_URL in .env")
+    logger.error("Missing QDRANT_API_KEY or CLUSTER_URL in .env")
     sys.exit(1)
 
-print(f"[INFO] Connecting to Qdrant cluster: {CLUSTER_URL}")
+logger.info("Connecting to Qdrant cluster: %s", CLUSTER_URL)
 
 try:
     qdrant = QdrantClient(
@@ -40,33 +48,31 @@ try:
         timeout=30,
         prefer_grpc=False,
     )
-    print("[✓] Connected to Qdrant cluster successfully.")
+    logger.info("Connected to Qdrant cluster successfully.")
 except Exception as e:
-    print(f"[ERROR] Failed to connect: {e}")
+    logger.error("Failed to connect: %s", e)
     sys.exit(1)
 
 # Get collection info
-print(f"\n[INFO] Retrieving collection '{COLLECTION_NAME}' info...")
+logger.info("Retrieving collection '%s' info...", COLLECTION_NAME)
 try:
     info = qdrant.get_collection(COLLECTION_NAME)
-    print(f"[✓] Collection found.")
-    print(f"    Points count    : {info.points_count}")
-    print(f"    Vector size     : {info.config.vectors_config.size if hasattr(info.config, 'vectors_config') else 'N/A'}")
+    logger.info("Collection found. Points count: %s", info.points_count)
 except Exception as e:
-    print(f"[ERROR] Failed to get collection info: {e}")
+    logger.error("Failed to get collection info: %s", e)
     sys.exit(1)
 
 # List all collections
-print(f"\n[INFO] Available collections:")
+logger.info("Available collections:")
 try:
     collections = qdrant.get_collections().collections
     for coll in collections:
-        print(f"    - {coll.name}")
+        logger.info("  - %s", coll.name)
 except Exception as e:
-    print(f"[ERROR] Failed to list collections: {e}")
+    logger.error("Failed to list collections: %s", e)
 
 # Retrieve and display sample documents
-print(f"\n[INFO] Retrieving sample documents...")
+logger.info("Retrieving sample documents...")
 try:
     # Scroll through the collection to get sample points
     points, next_page_offset = qdrant.scroll(
@@ -77,24 +83,22 @@ try:
     )
     
     if not points:
-        print("[WARN] No points found in collection!")
+        logger.warning("No points found in collection!")
     else:
-        print(f"[✓] Retrieved {len(points)} sample documents:\n")
+        logger.info("Retrieved %d sample documents:", len(points))
         for i, point in enumerate(points, 1):
             payload = point.payload
-            print(f"  [{i}] ID: {point.id}")
-            print(f"      Doc ID    : {payload.get('doc_id', 'N/A')}")
-            print(f"      Title     : {payload.get('title', 'N/A')}")
-            print(f"      PDF Path  : {payload.get('pdf_path', 'N/A')}")
-            print(f"      Pages     : {payload.get('page_start', 'N/A')}-{payload.get('page_end', 'N/A')}")
             text_preview = payload.get('text', '')[:100].replace('\n', ' ')
-            print(f"      Text      : {text_preview}...")
-            print()
+            logger.info(
+                "  [%d] id=%s  title=%s  pages=%s-%s  text=%s...",
+                i, point.id,
+                payload.get('title', 'N/A'),
+                payload.get('page_start', 'N/A'),
+                payload.get('page_end', 'N/A'),
+                text_preview,
+            )
 except Exception as e:
-    print(f"[ERROR] Failed to retrieve documents: {e}")
+    logger.error("Failed to retrieve documents: %s", e)
     sys.exit(1)
 
-print("[✓] Verification complete!")
-print(f"\n[INFO] Summary:")
-print(f"       Collection: {COLLECTION_NAME}")
-print(f"       Total uploaded documents: {info.points_count}")
+logger.info("Verification complete! Collection: %s  Total vectors: %s", COLLECTION_NAME, info.points_count)

@@ -7,10 +7,14 @@ Replaces s3_utils.py / MinIO with HuggingFace Hub dataset repository access.
 PDFs are stored in a dataset repo under the prefix  raw/{title}.pdf
 """
 
+import logging
 import os
+import time
 from typing import Optional
 
 from huggingface_hub import HfApi, hf_hub_url, login
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -43,12 +47,12 @@ def init_hf_client() -> HfApi:
     if _hf_api is None:
         if HF_TOKEN:
             login(token=HF_TOKEN, add_to_git_credential=False)
-            print(f"[INFO] HuggingFace Hub: authenticated as token owner")
+            logger.info("HuggingFace Hub: authenticated as token owner")
         else:
-            print("[WARNING] HF_TOKEN not set — only public repos will be accessible")
+            logger.warning("HF_TOKEN not set — only public repos will be accessible")
 
         _hf_api = HfApi(token=HF_TOKEN)
-        print(f"[INFO] HuggingFace Hub client initialised (repo: {HF_REPO_ID})")
+        logger.info("HuggingFace Hub client initialised (repo: %s)", HF_REPO_ID)
 
     return _hf_api
 
@@ -95,7 +99,7 @@ def generate_hf_url(hf_path: str, revision: Optional[str] = None) -> Optional[st
 
         return url
     except Exception as e:
-        print(f"[WARNING] Could not generate HuggingFace Hub URL for {hf_path}: {e}")
+        logger.warning("Could not generate HuggingFace Hub URL for %s: %s", hf_path, e)
         return None
 
 
@@ -120,11 +124,13 @@ def list_hf_documents(prefix: str = "raw/") -> list[dict]:
         api = get_hf_client()
         documents = []
 
+        _t0 = time.perf_counter()
         repo_files = api.list_repo_files(
             repo_id=HF_REPO_ID,
             repo_type=HF_REPO_TYPE,
             revision=HF_REVISION,
         )
+        logger.info("HuggingFace Hub list_repo_files completed in %.2fs", time.perf_counter() - _t0)
 
         for file_path in repo_files:
             if not file_path.startswith(prefix):
@@ -146,9 +152,9 @@ def list_hf_documents(prefix: str = "raw/") -> list[dict]:
             })
 
         documents.sort(key=lambda d: d["title"].lower())
-        print(f"[INFO] Listed {len(documents)} documents from HuggingFace Hub repo '{HF_REPO_ID}'")
+        logger.info("Listed %d documents from HuggingFace Hub repo '%s'", len(documents), HF_REPO_ID)
         return documents
 
     except Exception as e:
-        print(f"[ERROR] Failed to list HuggingFace Hub documents: {e}")
+        logger.error("Failed to list HuggingFace Hub documents: %s", e)
         return []

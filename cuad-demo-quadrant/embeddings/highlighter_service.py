@@ -2,6 +2,7 @@
 Highlighter Service: Sentence-level highlighting using local model.
 """
 
+import logging
 import os
 import traceback
 from fastapi import FastAPI, HTTPException, Request
@@ -9,6 +10,8 @@ from pydantic import BaseModel, Field
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 import torch
 import nltk
+
+logger = logging.getLogger(__name__)
 
 # Download NLTK resources
 try:
@@ -84,24 +87,30 @@ class BertTaggerForSentenceExtractionWithBackoff(BertPreTrainedModel):
         probs = torch.softmax(logits, dim=-1)[:, :, 1]
         
         if debug:
-            print(f"[DEBUG MODEL] logits shape: {logits.shape}, probs shape: {probs.shape}")
-            print(f"[DEBUG MODEL] offsets: {offsets}, num_sents_item: {num_sents_item}")
-            print(f"[DEBUG MODEL] probs: {probs}")
+            logger.debug("logits shape: %s, probs shape: %s", logits.shape, probs.shape)
+            logger.debug("offsets: %s, num_sents_item: %s", offsets, num_sents_item)
+            logger.debug("probs: %s", probs)
 
         def _get_preds(pp, offs, num_s, threshold=0.3, alpha=0.01, debug=False):
             preds = []
             for idx, (p, off, ns) in enumerate(zip(pp, offs, num_s)):
                 rel_probs = p[:ns]
                 if debug:
-                    print(f"[DEBUG] Sample {idx}: num_sentences={int(ns)}, probs={[float(x) for x in rel_probs]}, max={rel_probs.max().item():.4f}, threshold={threshold}, alpha={alpha}")
+                    logger.debug(
+                        "Sample %d: num_sentences=%d, probs=%s, max=%.4f, threshold=%s, alpha=%s",
+                        idx, int(ns), [float(x) for x in rel_probs], rel_probs.max().item(), threshold, alpha,
+                    )
                 hits = (rel_probs >= threshold).int()
                 if hits.sum() == 0 and rel_probs.max().item() >= alpha:
                     if debug:
-                        print(f"[DEBUG] No hits above threshold, triggering backoff. Setting sentence {rel_probs.argmax().item()} as hit (prob={rel_probs.max().item():.4f})")
+                        logger.debug(
+                            "No hits above threshold, triggering backoff. Setting sentence %d as hit (prob=%.4f)",
+                            rel_probs.argmax().item(), rel_probs.max().item(),
+                        )
                     hits[rel_probs.argmax()] = 1
                 sentence_indices = torch.where(hits == 1)[0] + off
                 if debug:
-                    print(f"[DEBUG] Final highlighted sentence indices: {sentence_indices.tolist()}")
+                    logger.debug("Final highlighted sentence indices: %s", sentence_indices.tolist())
                 preds.append(sentence_indices)
             return preds
 
@@ -112,7 +121,7 @@ HIGHLIGHTER_MODEL_ID = "opensearch-project/opensearch-semantic-highlighter-v1"
 
 # --------- Load Model and Tokenizer at Module Level ---------
 try:
-    print("[INFO] Loading highlighter model and tokenizer...")
+    logger.info("Loading highlighter model and tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(HIGHLIGHTER_MODEL_ID)
     
     # Load as the custom model class
@@ -126,9 +135,9 @@ try:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
     model.eval()
-    print(f"[INFO] Model loaded successfully on device: {device}")
+    logger.info("Highlighter model loaded successfully on device: %s", device)
 except Exception as e:
-    print(f"[ERROR] Failed to load highlighter model: {e}")
+    logger.error("Failed to load highlighter model: %s", e)
     traceback.print_exc()
     raise
 
@@ -250,9 +259,9 @@ async def highlight(request: HighlightRequest, http_request: Request):
             sentence_ids = sentence_ids.unsqueeze(0).to(device)
             
             if debug_param:
-                print(f"[DEBUG] sentence_ids shape: {sentence_ids.shape}")
-                print(f"[DEBUG] sentence_ids unique values: {torch.unique(sentence_ids)}")
-                print(f"[DEBUG] num sentences: {len(doc_sents)}")
+                logger.debug("sentence_ids shape: %s", sentence_ids.shape)
+                logger.debug("sentence_ids unique values: %s", torch.unique(sentence_ids))
+                logger.debug("num sentences: %d", len(doc_sents))
             
             # Run model inference
             with torch.no_grad():
@@ -278,14 +287,14 @@ async def highlight(request: HighlightRequest, http_request: Request):
                 highlighted_indexes = []
             
             if debug_param:
-                print(f"[DEBUG] Raw outputs type: {type(outputs)}, len: {len(outputs) if isinstance(outputs, (tuple, list)) else 'N/A'}")
-                print(f"[DEBUG] highlighted_tensor type: {type(highlighted_tensor) if 'highlighted_tensor' in locals() else 'N/A'}")
-                print(f"[DEBUG] highlighted_indexes (raw): {highlighted_indexes}")
+                logger.debug("Raw outputs type: %s, len: %s", type(outputs), len(outputs) if isinstance(outputs, (tuple, list)) else "N/A")
+                logger.debug("highlighted_tensor type: %s", type(highlighted_tensor) if 'highlighted_tensor' in locals() else "N/A")
+                logger.debug("highlighted_indexes (raw): %s", highlighted_indexes)
             
             highlighted_indexes = [int(idx) for idx in highlighted_indexes if idx < len(doc_sents)]
             
             if debug_param:
-                print(f"[DEBUG] highlighted_indexes (filtered): {highlighted_indexes}")
+                logger.debug("highlighted_indexes (filtered): %s", highlighted_indexes)
             
             # Build response
             highlighted_sentences = [doc_sents[i] for i in highlighted_indexes]

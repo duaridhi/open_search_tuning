@@ -17,6 +17,7 @@ Qdrant Collection Structure:
         page_offset_start, page_offset_end
 """
 
+import logging
 import os
 from typing import Optional, Tuple
 from qdrant_client.models import Filter, FieldCondition, MatchValue
@@ -24,6 +25,8 @@ from qdrant_client.models import Filter, FieldCondition, MatchValue
 # Import cluster connection and embedding client
 from qdrant_cluster_connect import get_qdrant_client, get_cluster_info
 from embeddings.embedding_client import get_embedding_client
+
+logger = logging.getLogger(__name__)
 
 
 # Configuration
@@ -45,13 +48,11 @@ def embed_query(query: str) -> list[float]:
     """Embed query using remote embedding service."""
     try:
         embedding_client = get_embedding_client()
-        print(f"[DEBUG] Encoding query via embedding service: {query[:50]}...")
         embeddings = embedding_client.embed([query])
         embedding_vector = embeddings[0] if embeddings else []
-        print(f"[DEBUG] Query embedding shape: {len(embedding_vector)}")
         return embedding_vector
     except Exception as e:
-        print(f"[ERROR] Failed to embed query: {e}")
+        logger.error("Failed to embed query: %s", e)
         raise
 
 
@@ -94,7 +95,6 @@ def semantic_search(
             )
 
         # Search in Qdrant using query_points (for qdrant-client 1.7.x)
-        print(f"[DEBUG] Searching Qdrant collection '{COLLECTION_NAME}'...")
         search_results = client.query_points(
             collection_name=COLLECTION_NAME,
             query=query_embedding,
@@ -102,7 +102,6 @@ def semantic_search(
             limit=top_k,
             with_payload=True,
         )
-        print(f"[DEBUG] Found {len(search_results.points)} results")
 
         # Format results
         results = []
@@ -136,7 +135,7 @@ def semantic_search(
                         highlight_page_offset_starts.append(page_start)
                         highlight_page_offset_ends.append(page_end)
                 except Exception as e:
-                    print(f"[WARN] Failed to highlight result for '{title}': {e}")
+                    logger.warning("Failed to highlight result for '%s': %s", title, e)
                 
                 results.append(
                     {
@@ -169,10 +168,10 @@ def semantic_search(
         return results, metadata
 
     except AttributeError as e:
-        print(f"[ERROR] Qdrant client method error: {e}")
+        logger.error("Qdrant client method error: %s", e)
         raise ValueError(f"Qdrant client error - using query_points method: {e}")
     except Exception as e:
-        print(f"[ERROR] Search error: {type(e).__name__}: {e}")
+        logger.error("Search error: %s: %s", type(e).__name__, e)
         raise
 
 
@@ -249,12 +248,10 @@ def get_collection_stats() -> dict:
     """Get collection statistics for health checks."""
     try:
         client = get_client()
-        print(f"[DEBUG] Fetching stats for collection: {COLLECTION_NAME}")
-        
+
         # Get collection info
         collection_info = client.get_collection(COLLECTION_NAME)
-        print(f"[DEBUG] Collection info retrieved: {collection_info}")
-        
+
         # Extract points count
         points_count = getattr(collection_info, "points_count", 0)
         
@@ -277,7 +274,7 @@ def get_collection_stats() -> dict:
                             vector_size = getattr(vectors_config, "size", None)
                             distance = getattr(vectors_config, "distance", None)
         except Exception as e:
-            print(f"[DEBUG] Could not extract vector config: {e}")
+            logger.debug("Could not extract vector config: %s", e)
         
         return {
             "collection": COLLECTION_NAME,
@@ -287,9 +284,7 @@ def get_collection_stats() -> dict:
             "status": "ready" if points_count is not None else "ready",
         }
     except Exception as e:
-        print(f"[ERROR] Failed to get collection stats: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error("Failed to get collection stats: %s: %s", type(e).__name__, e)
         return {
             "collection": COLLECTION_NAME,
             "status": "error",

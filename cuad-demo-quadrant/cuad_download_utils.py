@@ -21,8 +21,12 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from pathlib import Path
 from huggingface_hub import snapshot_download
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -66,7 +70,8 @@ def download_cuad_dataset(
         The resolved local directory containing the downloaded dataset.
     """
     local_dir = Path(local_dir or CUAD_LOCAL_DIR).resolve()
-    print(f"Downloading CUAD PDFs + TXTs + JSON to {local_dir} ...")
+    logger.info("Downloading CUAD PDFs + TXTs + JSON to %s ...", local_dir)
+    _t0 = time.perf_counter()
     snapshot_download(
         repo_id=REPO_ID,
         repo_type="dataset",
@@ -74,7 +79,7 @@ def download_cuad_dataset(
         allow_patterns=["*.pdf", "*.PDF", "*.txt", "*.TXT", "*.json"],
         max_workers=max_workers,
     )
-    print(f"✓ Download complete: {local_dir}")
+    logger.info("HuggingFace snapshot_download completed in %.2fs. Local dir: %s", time.perf_counter() - _t0, local_dir)
     return local_dir
 
 
@@ -160,5 +165,5 @@ def load_contracts_from_download(
     with json_path.open() as f:
         data = json.load(f)
     contracts = data["data"]
-    print(f"✓ Loaded {len(contracts)} contracts from {json_path}")
+    logger.info("Loaded %d contracts from %s", len(contracts), json_path)
     return contracts

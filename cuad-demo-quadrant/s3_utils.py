@@ -4,10 +4,13 @@ s3_utils.py
 S3/MinIO utilities for document storage and presigned URL generation.
 """
 
+import logging
 import os
 import boto3
 from botocore.config import Config
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 # Configuration
@@ -36,7 +39,7 @@ def init_s3_clients():
             aws_secret_access_key=MINIO_SECRET_KEY,
             config=Config(signature_version="s3v4"),
         )
-        print(f"[INFO] S3 internal client initialized: {MINIO_ENDPOINT}")
+        logger.info("S3 internal client initialized: %s", MINIO_ENDPOINT)
     
     if _s3_public is None:
         # Public client for presigned URLs (uses public endpoint)
@@ -47,7 +50,7 @@ def init_s3_clients():
             aws_secret_access_key=MINIO_SECRET_KEY,
             config=Config(signature_version="s3v4"),
         )
-        print(f"[INFO] S3 public client initialized: {MINIO_PUBLIC_ENDPOINT}")
+        logger.info("S3 public client initialized: %s", MINIO_PUBLIC_ENDPOINT)
     
     return _s3_internal, _s3_public
 
@@ -80,7 +83,7 @@ def generate_presigned_url(s3_key: str, expiry: Optional[int] = None) -> Optiona
         )
         return url
     except Exception as e:
-        print(f"[WARNING] Could not generate presigned URL for {s3_key}: {e}")
+        logger.warning("Could not generate presigned URL for %s: %s", s3_key, e)
         return None
 
 
@@ -131,5 +134,5 @@ def list_s3_documents(prefix: str = "raw/") -> list[dict]:
         return documents
     
     except Exception as e:
-        print(f"[ERROR] Failed to list S3 documents: {e}")
+        logger.error("Failed to list S3 documents: %s", e)
         return []

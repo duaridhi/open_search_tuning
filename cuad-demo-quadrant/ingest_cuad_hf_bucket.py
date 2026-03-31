@@ -1,10 +1,18 @@
 # %%
 # Imports and Setup
+import logging
 import os
 from pathlib import Path
 from huggingface_hub import snapshot_download, HfApi, login
 from cuad_download_utils import download_cuad_dataset, find_pdfs
 from dotenv import load_dotenv
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s – %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 # Configuration
@@ -14,7 +22,7 @@ REPO_TYPE = "dataset"
 CUAD_PDF_DIR = "/home/ridhi/projects/project1/open_search_tuning/cuad_opensearch/cuad_data"
 
 # %%
-print(os.path.abspath(CUAD_PDF_DIR))
+logger.info("CUAD PDF directory: %s", os.path.abspath(CUAD_PDF_DIR))
 
 # %%
 # Authenticate with Hugging Face
@@ -22,56 +30,54 @@ hf_token = os.getenv("HF_TOKEN")
 if not hf_token:
     raise EnvironmentError("HF_TOKEN environment variable is not set.")
 
-print("Logging in to Hugging Face...")
+logger.info("Logging in to Hugging Face...")
 login(token=hf_token)
 hf_api = HfApi()
-print("✓ Login successful")
+logger.info("Login successful")
 
 # Create dataset repository if it doesn't exist
 try:
     hf_api.create_repo(repo_id=HF_REPO_ID, repo_type=REPO_TYPE, exist_ok=True)
-    print(f"✓ Repository '{HF_REPO_ID}' ready")
+    logger.info("Repository '%s' ready", HF_REPO_ID)
 except Exception as e:
-    print(f"⚠ Repository creation warning: {e}")
+    logger.warning("Repository creation warning: %s", e)
 
 # %%
-print("Download the CUAD dataset")
+logger.info("Downloading CUAD dataset...")
 download_cuad_dataset(local_dir=CUAD_PDF_DIR, max_workers=8)
 
 # %%
 # Count and Display Files in downloaded directory
-print("\n" + "=" * 60)
-print("DOWNLOAD SUMMARY")
-print("=" * 60)
+logger.info("=" * 60)
+logger.info("DOWNLOAD SUMMARY")
+logger.info("=" * 60)
 
 cuad_data_path = (Path(CUAD_PDF_DIR) / "CUAD_v1/").resolve()
 pdf_list = find_pdfs(cuad_data_path)
 if cuad_data_path.exists():
     pdf_count = len(pdf_list)
-    print(f"✓ PDF documents found: {pdf_count}")
+    logger.info("PDF documents found: %d", pdf_count)
 
     if pdf_count == 510:
-        print("✓ All 510 contracts downloaded successfully!")
+        logger.info("All 510 contracts downloaded successfully!")
     else:
-        print(f"⚠ Expected 510 PDFs, found {pdf_count}")
+        logger.warning("Expected 510 PDFs, found %d", pdf_count)
 else:
-    print(f"✗ Data directory not found: {cuad_data_path}")
+    logger.error("Data directory not found: %s", cuad_data_path)
     raise FileNotFoundError(f"CUAD_v1 directory not found at {cuad_data_path}")
 
 
 # %%
 # Upload PDFs to Hugging Face dataset repository
-print("\n" + "=" * 60)
-print("UPLOADING PDFs TO HUGGING FACE")
-print("=" * 60)
+logger.info("UPLOADING PDFs TO HUGGING FACE")
 
 # Fetch existing files in the repo to support skipping already-uploaded files
-print("Fetching existing files from repository...")
+logger.info("Fetching existing files from repository...")
 try:
     existing_files = set(hf_api.list_repo_files(repo_id=HF_REPO_ID, repo_type=REPO_TYPE))
-    print(f"✓ Found {len(existing_files)} existing file(s) in repository")
+    logger.info("Found %d existing file(s) in repository", len(existing_files))
 except Exception as e:
-    print(f"⚠ Could not fetch existing files (will attempt all uploads): {e}")
+    logger.warning("Could not fetch existing files (will attempt all uploads): %s", e)
     existing_files = set()
 
 new_uploads = 0
@@ -100,32 +106,27 @@ for pdf_file in pdf_list:
             repo_type=REPO_TYPE,
         )
         new_uploads += 1
-        print(f"✓ Uploaded: {basename}")
+        logger.info("Uploaded: %s", basename)
 
     except Exception as e:
         failed_count += 1
         failed_files.append(str(pdf_file_path))
-        print(f"✗ Failed: {pdf_file_path} - {e}")
+        logger.error("Failed to upload %s: %s", pdf_file_path, e)
 
 
 # %%
 # Upload Summary
-print("\n" + "=" * 60)
-print("UPLOAD SUMMARY")
-print("=" * 60)
-print(f"New files uploaded: {new_uploads}")
-print(f"Files skipped (already exist): {skipped}")
-print(f"Failed uploads: {failed_count}")
-print(f"Total processed: {new_uploads + skipped + failed_count}")
+logger.info(
+    "Upload complete — new: %d  skipped: %d  failed: %d  total: %d",
+    new_uploads, skipped, failed_count, new_uploads + skipped + failed_count,
+)
 
 if failed_files:
-    print(f"\nFailed files:")
+    logger.warning("Failed files:")
     for f in failed_files[:10]:
-        print(f"  - {f}")
+        logger.warning("  - %s", f)
     if len(failed_files) > 10:
-        print(f"  ... and {len(failed_files) - 10} more")
-
-print("=" * 60)
+        logger.warning("  ... and %d more", len(failed_files) - 10)
 
 
 # %%
@@ -162,7 +163,7 @@ def get_file_from_hf(file_name: str, repo_id: str = HF_REPO_ID) -> bytes | None:
     """
     try:
         if not file_exists_in_hf(file_name, repo_id):
-            print(f"✗ File not found: {file_name}")
+            logger.error("File not found in HF repo: %s", file_name)
             return None
 
         local_path = hf_api.hf_hub_download(
@@ -172,11 +173,11 @@ def get_file_from_hf(file_name: str, repo_id: str = HF_REPO_ID) -> bytes | None:
         )
         with open(local_path, "rb") as f:
             file_content = f.read()
-        print(f"✓ Retrieved {file_name} from repository '{repo_id}'")
+        logger.info("Retrieved %s from repository '%s'", file_name, repo_id)
         return file_content
 
     except Exception as e:
-        print(f"✗ Error retrieving {file_name}: {e}")
+        logger.error("Error retrieving %s: %s", file_name, e)
         raise
 
 # %%

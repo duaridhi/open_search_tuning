@@ -13,10 +13,11 @@ Provides REST API endpoints for:
 import os
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Path
+from fastapi import FastAPI, HTTPException, Query, Path, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -34,6 +35,7 @@ from qdrant_search_hf import (
 )
 from document_utils import get_unique_documents, get_document_info
 from chat_hf import chat
+from perf_trace import start_trace, span, spans_header_value, record_span
 from qdrant_cluster_connect import get_cluster_info
 from hf_utils import init_hf_client, generate_hf_url, list_hf_documents
 
@@ -295,6 +297,7 @@ async def search_contracts(
         True,
         description="If false, skip per-sentence reranking and return chunks without highlights. Faster.",
     ),
+    response: Response = None,
 ) -> SearchResponse:
     """
     Search contracts using semantic similarity (vector search).
@@ -313,20 +316,22 @@ async def search_contracts(
         f"Search request: query='{q}', top_k={top_k}, document_name={document_name}, "
         f"strategy={strategy}, highlight={highlight}"
     )
+    start_trace()
     try:
         try:
-            results, metadata = await asyncio.wait_for(
-                asyncio.to_thread(
-                    search,
-                    q,
-                    top_k,
-                    document_name,
-                    strategy,
-                    0.0,
-                    highlight,
-                ),
-                timeout=SEARCH_TIMEOUT
-            )
+            with span("total"):
+                results, metadata = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        search,
+                        q,
+                        top_k,
+                        document_name,
+                        strategy,
+                        0.0,
+                        highlight,
+                    ),
+                    timeout=SEARCH_TIMEOUT
+                )
         except asyncio.TimeoutError:
             logger.error(f"Search timed out after {SEARCH_TIMEOUT}s for query: {q}")
             raise HTTPException(
@@ -362,6 +367,9 @@ async def search_contracts(
             )
         
         logger.info(f"Search query '{q}' returned {len(search_results)} results with strategy '{strategy}'")
+        header = spans_header_value()
+        if header and response is not None:
+            response.headers["X-Perf-Spans"] = header
         return SearchResponse(
             query=q,
             top_k=top_k,
@@ -538,24 +546,27 @@ class ChatResponse(BaseModel):
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
-async def chat_endpoint(request: ChatRequest) -> ChatResponse:
+async def chat_endpoint(request: ChatRequest, response: Response = None) -> ChatResponse:
     """
     Answer a question using RAG: retrieves top-k contract passages from Qdrant
     then generates a grounded answer via HuggingFace Inference API.
     """
     logger.info(f"Chat request: query='{request.query}', top_k={request.top_k}")
+    start_trace()
+    _t_chat_start = time.perf_counter()
     try:
         try:
-            results, _ = await asyncio.wait_for(
-                asyncio.to_thread(
-                    search,
-                    request.query,
-                    request.top_k,
-                    request.document_name,
-                    request.strategy,
-                ),
-                timeout=SEARCH_TIMEOUT,
-            )
+            with span("retrieve"):
+                results, _ = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        search,
+                        request.query,
+                        request.top_k,
+                        request.document_name,
+                        request.strategy,
+                    ),
+                    timeout=SEARCH_TIMEOUT,
+                )
         except asyncio.TimeoutError:
             raise HTTPException(
                 status_code=504,
@@ -597,6 +608,10 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
                 )
             )
         logger.info(f"Chat answered query '{request.query}' using {len(results)} passages")
+        record_span("total", (time.perf_counter() - _t_chat_start) * 1000.0)
+        header = spans_header_value()
+        if header and response is not None:
+            response.headers["X-Perf-Spans"] = header
         return ChatResponse(
             query=request.query,
             answer=answer,

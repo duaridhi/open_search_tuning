@@ -20,6 +20,8 @@ from qdrant_cluster_connect import get_qdrant_client, get_cluster_info
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from dotenv import load_dotenv
 
+from perf_trace import span
+
 logger = logging.getLogger(__name__)
 
 env_path = Path(__file__).parent / ".env"
@@ -66,8 +68,9 @@ def highlight_text(query: str, document: str):
 	"""
 	try:
 		# Split document into sentences (handle common delimiters)
-		sentences = re.split(r'(?<=[.!?])\s+', document.strip())
-		sentences = [s.strip() for s in sentences if s.strip()]
+		with span("highlight_assemble"):
+			sentences = re.split(r'(?<=[.!?])\s+', document.strip())
+			sentences = [s.strip() for s in sentences if s.strip()]
 
 		if not sentences:
 			return {"highlighted_sentences": [], "highlight_sentence_indexes": [], "highlight_offsets": []}
@@ -75,7 +78,8 @@ def highlight_text(query: str, document: str):
 		# Score all sentences in a single batched local forward pass
 		_reranker_t0 = time.perf_counter()
 		try:
-			raw_scores = _reranker.predict([(query, s) for s in sentences], batch_size=32)
+			with span("rerank"):
+				raw_scores = _reranker.predict([(query, s) for s in sentences], batch_size=32)
 			sentence_scores = (1.0 / (1.0 + np.exp(-np.asarray(raw_scores, dtype=np.float32)))).tolist()
 		except Exception as e:
 			logger.warning("Local CrossEncoder failed: %s", e)
@@ -86,39 +90,40 @@ def highlight_text(query: str, document: str):
 			time.perf_counter() - _reranker_t0,
 		)
 		
-		# Find top-scoring sentences (above threshold)
-		threshold = 0.5
-		highlighted_pairs = [(i, sentence, score) for i, (sentence, score) in enumerate(zip(sentences, sentence_scores)) if score >= threshold]
+		with span("highlight_assemble"):
+			# Find top-scoring sentences (above threshold)
+			threshold = 0.5
+			highlighted_pairs = [(i, sentence, score) for i, (sentence, score) in enumerate(zip(sentences, sentence_scores)) if score >= threshold]
 
-		# Sort by score descending
-		highlighted_pairs.sort(key=lambda x: x[2], reverse=True)
+			# Sort by score descending
+			highlighted_pairs.sort(key=lambda x: x[2], reverse=True)
 
-		# Limit to top 5 most relevant sentences
-		top_k = 5
-		highlighted_pairs = highlighted_pairs[:top_k]
+			# Limit to top 5 most relevant sentences
+			top_k = 5
+			highlighted_pairs = highlighted_pairs[:top_k]
 
-		# Calculate character offsets in original document
-		highlight_offsets = []
-		current_pos = 0
-		sentence_positions = {}
+			# Calculate character offsets in original document
+			highlight_offsets = []
+			current_pos = 0
+			sentence_positions = {}
 
-		for i, sentence in enumerate(sentences):
-			pos = document.find(sentence, current_pos)
-			if pos != -1:
-				sentence_positions[i] = (pos, pos + len(sentence))
-				current_pos = pos + len(sentence)
+			for i, sentence in enumerate(sentences):
+				pos = document.find(sentence, current_pos)
+				if pos != -1:
+					sentence_positions[i] = (pos, pos + len(sentence))
+					current_pos = pos + len(sentence)
 
-		highlighted_sentences = []
-		highlight_sentence_indexes = []
+			highlighted_sentences = []
+			highlight_sentence_indexes = []
 
-		for sent_idx, sentence, score in highlighted_pairs:
-			highlighted_sentences.append(sentence)
-			highlight_sentence_indexes.append(sent_idx)
-			if sent_idx in sentence_positions:
-				start, end = sentence_positions[sent_idx]
-				highlight_offsets.append((start, end))
+			for sent_idx, sentence, score in highlighted_pairs:
+				highlighted_sentences.append(sentence)
+				highlight_sentence_indexes.append(sent_idx)
+				if sent_idx in sentence_positions:
+					start, end = sentence_positions[sent_idx]
+					highlight_offsets.append((start, end))
 
-		avg_score = np.mean([s[2] for s in highlighted_pairs]) if highlighted_pairs else 0.0
+			avg_score = np.mean([s[2] for s in highlighted_pairs]) if highlighted_pairs else 0.0
 
 		return {
 			"highlighted_sentences": highlighted_sentences,
@@ -139,19 +144,21 @@ def semantic_search(
 ) -> Tuple[list[dict], dict]:
 	try:
 		client_qdrant = get_client()
-		query_embedding = embed_query(query)
+		with span("embed"):
+			query_embedding = embed_query(query)
 		search_filter = None
 		if document_name:
 			search_filter = Filter(
 				must=[FieldCondition(key="title", match=MatchValue(value=document_name))]
 			)
-		search_results = client_qdrant.query_points(
-			collection_name=COLLECTION_NAME,
-			query=query_embedding,
-			query_filter=search_filter,
-			limit=top_k,
-			with_payload=True,
-		)
+		with span("qdrant_query"):
+			search_results = client_qdrant.query_points(
+				collection_name=COLLECTION_NAME,
+				query=query_embedding,
+				query_filter=search_filter,
+				limit=top_k,
+				with_payload=True,
+			)
 		results = []
 		for point in search_results.points:
 			if point.score >= min_score:

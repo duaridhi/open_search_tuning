@@ -15,6 +15,8 @@ from typing import Optional
 from huggingface_hub import InferenceClient
 from dotenv import load_dotenv
 
+from perf_trace import span
+
 logger = logging.getLogger(__name__)
 
 env_path = Path(__file__).parent / ".env"
@@ -105,15 +107,16 @@ def chat(
 
     client = _get_inference_client()
     _t0 = time.perf_counter()
-    completion = client.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        max_tokens=CHAT_MAX_TOKENS,
-        temperature=CHAT_TEMPERATURE,
-    )
+    with span("chat_completion"):
+        completion = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            max_tokens=CHAT_MAX_TOKENS,
+            temperature=CHAT_TEMPERATURE,
+        )
     _elapsed = time.perf_counter() - _t0
 
     answer = completion.choices[0].message.content

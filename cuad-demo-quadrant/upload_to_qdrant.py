@@ -53,10 +53,10 @@ logger.info("Imports loaded successfully.")
 # %% Configuration — load .env and set constants
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-COLLECTION_NAME   = "cuad_contracts"
+COLLECTION_NAME   = os.getenv("QDRANT_COLLECTION", "cuad_contracts")
 VECTOR_SIZE       = 384  # all-MiniLM-L6-v2
 
-MAX_DOCS          = int(os.getenv("MAX_DOCS", "1000"))
+MAX_DOCS          = int(os.getenv("MAX_DOCS", "500000"))  # effectively uncapped for full CUAD corpus
 CHUNK_SIZE        = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP     = int(os.getenv("CHUNK_OVERLAP", "50"))
 ENCODE_BATCH_SIZE = int(os.getenv("ENCODE_BATCH_SIZE", "32"))

@@ -1,224 +1,43 @@
-# Text Chunking Strategy for CUAD Contract Embeddings
-
-## Overview
-
-The CUAD PDF ingestion pipeline uses a **smart hierarchical boundary-aware chunking strategy** to split contract text into semantically meaningful chunks before embedding and uploading to Qdrant vector database.
-
-## Chunking Strategy
-
-### Core Algorithm: `split_text_with_offsets()`
-
-Located in `upload_to_qdrant.py`, the chunking function implements a **sliding window with intelligent boundary detection**:
-
-```python
-def split_text_with_offsets(text: str, chunk_size: int, chunk_overlap: int) -> list[dict]:
-    separators = ["\n\n", "\n", " ", ""]
-    # ... splits at best available boundary
-```
-
-### Strategy Details
-
-#### 1. **Hierarchical Boundary Detection**
-The algorithm attempts to break text at natural boundaries in this priority order:
-- **Paragraph boundaries** (`"\n\n"`) — highest priority
-- **Line boundaries** (`"\n"`)
-- **Word boundaries** (` ` space)
-- **Character boundaries** (`""`) — fallback only
-
-This ensures chunks respect document structure and semantic coherence.
-
-#### 2. **How It Works**
-
-```
-┌─────────────────────────────────────────────────────────┐
-│ Full Contract Text                                       │
-└─────────────────────────────────────────────────────────┘
-         ↓
-    [Start at offset 0]
-         ↓
-┌─────────────────────────────────────────────────────────┐
-│ Try to fit chunk_size (500 chars) of text               │
-│ Then search backwards for nearest separator             │
-│       [next_chunk_boundary] ← found at \n\n            │
-└─────────────────────────────────────────────────────────┘
-         ↓
-┌─────────────────────────────────────────────────────────┐
-│ Yield Chunk 1: { text, char_start, char_end }           │
-└─────────────────────────────────────────────────────────┘
-         ↓
-    [Advance by (end - overlap)]
-    [Move to next chunk with 50-char overlap]
-         ↓
-    [Repeat until text exhausted]
-```
-
-#### 3. **Overlap for Context Preservation**
-
-- Default overlap: **50 characters**
-- Ensures semantic continuity between chunks
-- Important for vector search — similar content appears in adjacent chunks
-- Example:
-  ```
-  Chunk 1 ends: "...payment shall be made within 30 days."
-  Chunk 2 starts: "...within 30 days. Any late payment will incur..."
-                     ↑ overlapping context from Chunk 1
-  ```
-
-### Configuration Parameters
-
-| Parameter | Default | Purpose |
-|-----------|---------|---------|
-| `CHUNK_SIZE` | 500 chars | Target size per chunk |
-| `CHUNK_OVERLAP` | 50 chars | Context overlap between chunks |
-| `MAX_DOCS` | 1000 chunks | Total chunks to upload |
-| `ENCODE_BATCH_SIZE` | 32 | Chunks per embedding batch |
-| `UPLOAD_BATCH_SIZE` | 100 | Chunks per Qdrant upsert |
-
-## Rationale for This Strategy
-
-### 1. **Semantic Preservation** 
-- Contracts are highly structured documents with clear logical boundaries (clauses, sections, subsections)
-- Breaking at paragraph/line boundaries keeps related sentences together
-- Avoids splitting mid-sentence or mid-clause, which would lose meaning
-
-### 2. **RAG Optimization**
-- For retrieval-augmented generation (RAG), chunks should be semantically cohesive
-- When a chunk is retrieved as context, the model expects complete thoughts
-- Boundary-aware chunking improves relevance of retrieved context
-
-### 3. **Legal Document Specificity**
-- Contract clauses often span multiple lines
-- Paragraph breaks typically separate distinct legal obligations or definitions
-- Natural language models (embedding models) perform better on semantically complete units
-
-### 4. **Overlap for Robustness**
-- Query might match content spanning two chunks
-- Overlap ensures retrieval captures complete relevant context
-- Trade-off: 50 chars is minimal overhead (10% of 500), benefits retrieval accuracy significantly
-
-### 5. **Fallback Handling**
-- If a 500-char window has no natural boundaries within the middle 50% (chunk_size // 2 = 250 chars), the algorithm falls back to character-level splitting
-- This prevents infinite loops on text without natural boundaries (e.g., URLs, base64, code blocks)
-- Rare in contract text but handles edge cases gracefully
-
-## Implementation Flow
-
-```
-┌─ Extract Text from PDF (all pages) ─────────────────┐
-│                                                      │
-├─ Concatenate pages with \n\n separator              │
-│                                                      │
-├─ Build page_map: map character offsets → page #     │
-│                                                      │
-├─ For each PDF:                                       │
-│   ├─ Split full text into chunks using boundaries   │
-│   │                                                  │
-│   └─ For each chunk:                                │
-│       ├─ Calculate which pages it spans             │
-│       ├─ Store metadata:                            │
-│       │  - doc_id, title, text                      │
-│       │  - char_start/end (for PDF highlighting)    │
-│       │  - page_start/end (for citation)            │
-│       │  - pdf_path (for traceability)              │
-│       │                                              │
-│       └─ Yield for embedding                        │
-│                                                      │
-└─ Batch encode embeddings & upsert to Qdrant ────────┘
-```
-
-## Metadata Attached to Each Chunk
-
-```python
-{
-    "doc_id": "contract-name-chunk-42",      # Unique ID
-    "title": "contract-name",                # PDF filename stem
-    "text": "...",                           # Actual text (500 chars)
-    "char_start": 1250,                      # Start offset in full text
-    "char_end": 1750,                        # End offset in full text
-    "page_start": 3,                         # Page(s) this chunk spans
-    "page_end": 4,
-    "pdf_path": "path/to/contract.pdf",     # Relative path for retrieval
-}
-```
-
-This metadata enables:
-- **Exact citation**: Link search results directly to PDF pages
-- **Traceability**: Know which contract and location each embedding came from
-- **Transparency**: Show users the source text chunk alongside similarity scores
-
-## Performance Characteristics
-
-| Metric | Value | Notes |
-|--------|-------|-------|
-| Chunk size | ~500 chars | ≈ 150–200 tokens for language models |
-| Overlap | 50 chars | ≈ 15–20 tokens |
-| Effective unique content per chunk | ~450 chars | (500 - 50 overlap) |
-| Max chunks per contract | Varies | Depends on contract length |
-| Processing batches | 100-chunk upserts | Balances memory vs. network round-trips |
-
-## Why NOT Other Strategies?
-
-### ❌ Fixed Character-only Splitting
-- Would break contracts mid-clause
-- "...party shall" | "...indemnify" (semantically broken)
-- Poor retrieval quality
-
-### ❌ Sentence-based Splitting
-- Contract "sentences" can be very long (100+ tokens)
-- Would create inconsistent chunk sizes (too large for some)
-- "Sentence" tokenization unreliable in legal text (e.g., "U.S." is not end of sentence)
-
-### ❌ No Overlap
-- Query might start at the end of one chunk and continue into next
-- Without overlap, key context would be missing from retrieved chunk
-- Significantly degrades RAG quality
-
-### ✅ This Strategy: Hierarchical Boundaries with Overlap
-- Respects document structure (legal precision)
-- Consistent encoding/retrieval (same chunk sizes across collection)
-- Robust against edge cases (fallback to character level)
-- Context-aware retrieval (overlap ensures complete thoughts)
-
-## Usage Example
-
-```bash
-# Set environment variables
-export QDRANT_API_KEY="your_api_key"
-export CLUSTER_URL="https://your-qdrant-cluster"
-export MAX_DOCS=5000          # Upload 5000 chunks (instead of default 1000)
-export CHUNK_SIZE=800         # Larger chunks (instead of default 500)
-export CHUNK_OVERLAP=100      # More overlap (instead of default 50)
-
-# Run ingestion
-python upload_to_qdrant.py
-```
-
-## Monitoring & Tuning
-
-When running uploads, watch for:
-
-```
-[DEBUG] {title}: {N} pages, {M:,} chars
-```
-
-**If chunks seem too large:**
-- Reduce `CHUNK_SIZE` (e.g., 300–400) for more granular retrieval
-- Increases total chunks and computation time
-
-**If chunks seem too small:**
-- Increase `CHUNK_SIZE` (e.g., 700–1000) for broader context
-- Reduces total chunks but may lose fine-grained retrieval
-
-**If retrieval is imprecise:**
-- Increase `CHUNK_OVERLAP` to 100–150 for richer context overlap
-- Improves recall at small storage cost
+# Chunking Strategy
 
 ## Summary
 
-This chunking strategy balances:
-- **Semantic coherence** (hierarchical boundaries)
-- **Retrieval accuracy** (overlap for context)
-- **Practical efficiency** (reasonable batch sizes)
-- **Legal precision** (metadata for exact citations)
+The ingestion pipeline ([upload_to_qdrant.py](../cuad-demo-quadrant/upload_to_qdrant.py)) uses **fixed-size character chunking with overlap and natural boundary snapping**.
 
-The result is chunks that embeddings models can meaningfully represent, and that users can trace back to exact contract locations.
+Each PDF is extracted page-by-page, pages are joined with `\n\n`, and the resulting full-document string is split by `split_text_with_offsets()` using these parameters (all tunable via env vars):
+
+| Parameter | Default | Env var |
+|---|---|---|
+| Chunk size | 500 chars | `CHUNK_SIZE` |
+| Overlap | 50 chars | `CHUNK_OVERLAP` |
+
+**Boundary snapping**: before finalising each chunk boundary, the splitter looks backwards for the nearest natural separator in priority order: `\n\n` → `\n` → ` ` → (hard cut). A separator is only accepted if it falls in the second half of the window (`idx > chunk_size // 2`), preventing degenerate single-word chunks.
+
+**Overlap**: the next chunk starts `chunk_overlap` characters before the end of the previous chunk, so clause text that straddles a boundary appears in both adjacent chunks.
+
+**Metadata preserved per chunk**: `char_start`, `char_end`, `page_start`, `page_end`, `page_offset_start`, `page_offset_end`, `title`, `pdf_path`, `doc_id` (`{title}-chunk-{idx}`).
+
+Each chunk is embedded with `sentence-transformers/all-MiniLM-L6-v2` (384-dim, cosine, L2-normalised) and upserted into Qdrant with a deterministic UUID seeded from `doc_id`, making re-ingestion idempotent.
+
+---
+
+## Pros
+
+- **Simple and predictable.** Every chunk is close to the same character length, so embedding quality and Qdrant payload sizes are uniform and easy to reason about.
+- **Overlap prevents hard clause splits.** The 50-char overlap means a key phrase that falls at a boundary will appear in at least one chunk in full, improving recall for short queries.
+- **Natural boundary snapping reduces mid-word cuts.** Preferring `\n\n` and `\n` over hard character cuts keeps most chunks ending on a paragraph or line boundary, preserving readability in highlights.
+- **Fully idempotent.** Deterministic UUIDs mean re-running the pipeline replaces rather than duplicates points; safe to re-run after parameter tweaks.
+- **Tunable without code changes.** `CHUNK_SIZE`, `CHUNK_OVERLAP`, and `MAX_DOCS` are all env vars, so experimenting with different granularities requires no edits.
+- **Page-level provenance.** Each chunk records `page_start`/`page_end` and intra-page character offsets, enabling the API to link results back to the exact page in the source PDF.
+
+---
+
+## Cons
+
+- **Character count ≠ token count.** The 500-char window does not account for the model's 256-token max sequence length (`all-MiniLM-L6-v2`). Dense legal prose (~4 chars/token) fits within ~125 tokens — well under the cap — but formatted tables or lists with many short tokens could silently exceed it and be truncated by the tokeniser, producing degraded embeddings without any warning.
+- **Ignores semantic structure.** The splitter has no knowledge of contract sections, article headings, or clause boundaries. A clause that spans 800 characters will be split in the middle, and both halves lose context about which section they belong to.
+- **No sentence-aware boundaries.** The fallback separators (`\n\n`, `\n`, ` `) do not align to sentence endings. A chunk may start or end mid-sentence if no whitespace falls in the right part of the window.
+- **Overlap is small relative to chunk size (10%).** A 50-char overlap carries roughly one short phrase. If the relevant clause begins 100+ chars before a boundary it will still be split across non-overlapping chunks.
+- **Full-document text join loses page structure.** Pages are concatenated with `\n\n` before chunking, so a chunk can silently span a page boundary. The page metadata is recovered by a separate character-offset lookup — an approximation that can assign a chunk to the wrong page if the extracted text has irregular whitespace.
+- **No deduplication of repeated boilerplate.** CUAD contracts often contain identical header/footer text on every page. These repeating strings generate many near-identical chunks that waste index capacity and dilute search results without adding retrieval value.
+- **Slow extraction fallback.** Without `pymupdf`, the pipeline falls back to `pdfplumber`, which is significantly slower on 510 PDFs and can mis-extract text from PDFs with complex layouts (tables, multi-column text).

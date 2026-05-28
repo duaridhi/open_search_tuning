@@ -1,0 +1,576 @@
+[
+  {
+    "id": "affiliate_license_licensee__short",
+    "q": "Affiliate License-Licensee",
+    "category": "Affiliate License-Licensee",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "affiliate_license_licensee__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Affiliate License-Licensee\" that should be reviewed by a lawyer. Details: Does the contract contain a license grant to a licensee (incl. sublicensor) and the affiliates of such licensee/sublicensor?",
+    "category": "Affiliate License-Licensee",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "affiliate_license_licensor__short",
+    "q": "Affiliate License-Licensor",
+    "category": "Affiliate License-Licensor",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "affiliate_license_licensor__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Affiliate License-Licensor\" that should be reviewed by a lawyer. Details: Does the contract contain a license grant by affiliates of the licensor or that includes intellectual property of affiliates of the licensor?",
+    "category": "Affiliate License-Licensor",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "agreement_date__short",
+    "q": "Agreement Date",
+    "category": "Agreement Date",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "agreement_date__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Agreement Date\" that should be reviewed by a lawyer. Details: The date of the contract",
+    "category": "Agreement Date",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "anti_assignment__short",
+    "q": "Anti-Assignment",
+    "category": "Anti-Assignment",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "anti_assignment__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Anti-Assignment\" that should be reviewed by a lawyer. Details: Is consent or notice required of a party if the contract is assigned to a third party?",
+    "category": "Anti-Assignment",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "audit_rights__short",
+    "q": "Audit Rights",
+    "category": "Audit Rights",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "audit_rights__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Audit Rights\" that should be reviewed by a lawyer. Details: Does a party have the right to  audit the books, records, or physical locations of the counterparty to ensure compliance with the contract?",
+    "category": "Audit Rights",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "cap_on_liability__short",
+    "q": "Cap On Liability",
+    "category": "Cap On Liability",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "cap_on_liability__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Cap On Liability\" that should be reviewed by a lawyer. Details: Does the contract include a cap on liability upon the breach of a party’s obligation? This includes time limitation for the counterparty to bring claims or maximum amount for recovery.",
+    "category": "Cap On Liability",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "change_of_control__short",
+    "q": "Change Of Control",
+    "category": "Change Of Control",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "change_of_control__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Change Of Control\" that should be reviewed by a lawyer. Details: Does one party have the right to terminate or is consent or notice required of the counterparty if such party undergoes a change of control, such as a merger, stock sale, transfer of all or substantially all of its assets or business, or assignment by operation of law?",
+    "category": "Change Of Control",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "competitive_restriction_exception__short",
+    "q": "Competitive Restriction Exception",
+    "category": "Competitive Restriction Exception",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "competitive_restriction_exception__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Competitive Restriction Exception\" that should be reviewed by a lawyer. Details: This category includes the exceptions or carveouts to Non-Compete, Exclusivity and No-Solicit of Customers above.",
+    "category": "Competitive Restriction Exception",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "covenant_not_to_sue__short",
+    "q": "Covenant Not To Sue",
+    "category": "Covenant Not To Sue",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "covenant_not_to_sue__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Covenant Not To Sue\" that should be reviewed by a lawyer. Details: Is a party restricted from contesting the validity of the counterparty’s ownership of intellectual property or otherwise bringing a claim against the counterparty for matters unrelated to the contract?",
+    "category": "Covenant Not To Sue",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "document_name__short",
+    "q": "Document Name",
+    "category": "Document Name",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "document_name__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Document Name\" that should be reviewed by a lawyer. Details: The name of the contract",
+    "category": "Document Name",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "effective_date__short",
+    "q": "Effective Date",
+    "category": "Effective Date",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "effective_date__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Effective Date\" that should be reviewed by a lawyer. Details: The date when the contract is effective",
+    "category": "Effective Date",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "exclusivity__short",
+    "q": "Exclusivity",
+    "category": "Exclusivity",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "exclusivity__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Exclusivity\" that should be reviewed by a lawyer. Details: Is there an exclusive dealing  commitment with the counterparty? This includes a commitment to procure all “requirements” from one party of certain technology, goods, or services or a prohibition on licensing or selling technology, goods or services to third parties, or a prohibition on  collaborating or working with other parties), whether during the contract or  after the contract ends (or both).",
+    "category": "Exclusivity",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "expiration_date__short",
+    "q": "Expiration Date",
+    "category": "Expiration Date",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "expiration_date__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Expiration Date\" that should be reviewed by a lawyer. Details: On what date will the contract's initial term expire?",
+    "category": "Expiration Date",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "governing_law__short",
+    "q": "Governing Law",
+    "category": "Governing Law",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "governing_law__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Governing Law\" that should be reviewed by a lawyer. Details: Which state/country's law governs the interpretation of the contract?",
+    "category": "Governing Law",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "insurance__short",
+    "q": "Insurance",
+    "category": "Insurance",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "insurance__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Insurance\" that should be reviewed by a lawyer. Details: Is there a requirement for insurance that must be maintained by one party for the benefit of the counterparty?",
+    "category": "Insurance",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "ip_ownership_assignment__short",
+    "q": "Ip Ownership Assignment",
+    "category": "Ip Ownership Assignment",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "ip_ownership_assignment__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Ip Ownership Assignment\" that should be reviewed by a lawyer. Details: Does intellectual property created  by one party become the property of the counterparty, either per the terms of the contract or upon the occurrence of certain events?",
+    "category": "Ip Ownership Assignment",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "irrevocable_or_perpetual_license__short",
+    "q": "Irrevocable Or Perpetual License",
+    "category": "Irrevocable Or Perpetual License",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "irrevocable_or_perpetual_license__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Irrevocable Or Perpetual License\" that should be reviewed by a lawyer. Details: Does the contract contain a  license grant that is irrevocable or perpetual?",
+    "category": "Irrevocable Or Perpetual License",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "joint_ip_ownership__short",
+    "q": "Joint Ip Ownership",
+    "category": "Joint Ip Ownership",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "joint_ip_ownership__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Joint Ip Ownership\" that should be reviewed by a lawyer. Details: Is there any clause providing for joint or shared ownership of intellectual property between the parties to the contract?",
+    "category": "Joint Ip Ownership",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "license_grant__short",
+    "q": "License Grant",
+    "category": "License Grant",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "license_grant__question",
+    "q": "Highlight the parts (if any) of this contract related to \"License Grant\" that should be reviewed by a lawyer. Details: Does the contract contain a license granted by one party to its counterparty?",
+    "category": "License Grant",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "liquidated_damages__short",
+    "q": "Liquidated Damages",
+    "category": "Liquidated Damages",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "liquidated_damages__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Liquidated Damages\" that should be reviewed by a lawyer. Details: Does the contract contain a clause that would award either party liquidated damages for breach or a fee upon the termination of a contract (termination fee)?",
+    "category": "Liquidated Damages",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "minimum_commitment__short",
+    "q": "Minimum Commitment",
+    "category": "Minimum Commitment",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "minimum_commitment__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Minimum Commitment\" that should be reviewed by a lawyer. Details: Is there a minimum order size or minimum amount or units per-time period that one party must buy from the counterparty under the contract?",
+    "category": "Minimum Commitment",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "most_favored_nation__short",
+    "q": "Most Favored Nation",
+    "category": "Most Favored Nation",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "most_favored_nation__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Most Favored Nation\" that should be reviewed by a lawyer. Details: Is there a clause that if a third party gets better terms on the licensing or sale of technology/goods/services described in the contract, the buyer of such technology/goods/services under the contract shall be entitled to those better terms?",
+    "category": "Most Favored Nation",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "no_solicit_of_customers__short",
+    "q": "No-Solicit Of Customers",
+    "category": "No-Solicit Of Customers",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "no_solicit_of_customers__question",
+    "q": "Highlight the parts (if any) of this contract related to \"No-Solicit Of Customers\" that should be reviewed by a lawyer. Details: Is a party restricted from contracting or soliciting customers or partners of the counterparty, whether during the contract or after the contract ends (or both)?",
+    "category": "No-Solicit Of Customers",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "no_solicit_of_employees__short",
+    "q": "No-Solicit Of Employees",
+    "category": "No-Solicit Of Employees",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "no_solicit_of_employees__question",
+    "q": "Highlight the parts (if any) of this contract related to \"No-Solicit Of Employees\" that should be reviewed by a lawyer. Details: Is there a restriction on a party’s soliciting or hiring employees and/or contractors from the  counterparty, whether during the contract or after the contract ends (or both)?",
+    "category": "No-Solicit Of Employees",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "non_compete__short",
+    "q": "Non-Compete",
+    "category": "Non-Compete",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "non_compete__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Non-Compete\" that should be reviewed by a lawyer. Details: Is there a restriction on the ability of a party to compete with the counterparty or operate in a certain geography or business or technology sector?",
+    "category": "Non-Compete",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "non_disparagement__short",
+    "q": "Non-Disparagement",
+    "category": "Non-Disparagement",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "non_disparagement__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Non-Disparagement\" that should be reviewed by a lawyer. Details: Is there a requirement on a party not to disparage the counterparty?",
+    "category": "Non-Disparagement",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "non_transferable_license__short",
+    "q": "Non-Transferable License",
+    "category": "Non-Transferable License",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "non_transferable_license__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Non-Transferable License\" that should be reviewed by a lawyer. Details: Does the contract limit the ability of a party to transfer the license being granted to a third party?",
+    "category": "Non-Transferable License",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "notice_period_to_terminate_renewal__short",
+    "q": "Notice Period To Terminate Renewal",
+    "category": "Notice Period To Terminate Renewal",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "notice_period_to_terminate_renewal__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Notice Period To Terminate Renewal\" that should be reviewed by a lawyer. Details: What is the notice period required to terminate renewal?",
+    "category": "Notice Period To Terminate Renewal",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "parties__short",
+    "q": "Parties",
+    "category": "Parties",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "parties__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Parties\" that should be reviewed by a lawyer. Details: The two or more parties who signed the contract",
+    "category": "Parties",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "post_termination_services__short",
+    "q": "Post-Termination Services",
+    "category": "Post-Termination Services",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "post_termination_services__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Post-Termination Services\" that should be reviewed by a lawyer. Details: Is a party subject to obligations after the termination or expiration of a contract, including any post-termination transition, payment, transfer of IP, wind-down, last-buy, or similar commitments?",
+    "category": "Post-Termination Services",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "price_restrictions__short",
+    "q": "Price Restrictions",
+    "category": "Price Restrictions",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "price_restrictions__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Price Restrictions\" that should be reviewed by a lawyer. Details: Is there a restriction on the  ability of a party to raise or reduce prices of technology, goods, or  services provided?",
+    "category": "Price Restrictions",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "renewal_term__short",
+    "q": "Renewal Term",
+    "category": "Renewal Term",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "renewal_term__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Renewal Term\" that should be reviewed by a lawyer. Details: What is the renewal term after the initial term expires? This includes automatic extensions and unilateral extensions with prior notice.",
+    "category": "Renewal Term",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "revenue_profit_sharing__short",
+    "q": "Revenue/Profit Sharing",
+    "category": "Revenue/Profit Sharing",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "revenue_profit_sharing__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Revenue/Profit Sharing\" that should be reviewed by a lawyer. Details: Is one party required to share revenue or profit with the counterparty for any technology, goods, or services?",
+    "category": "Revenue/Profit Sharing",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "rofr_rofo_rofn__short",
+    "q": "Rofr/Rofo/Rofn",
+    "category": "Rofr/Rofo/Rofn",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "rofr_rofo_rofn__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Rofr/Rofo/Rofn\" that should be reviewed by a lawyer. Details: Is there a clause granting one party a right of first refusal, right of first offer or right of first negotiation to purchase, license, market, or distribute equity interest, technology, assets, products or services?",
+    "category": "Rofr/Rofo/Rofn",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "source_code_escrow__short",
+    "q": "Source Code Escrow",
+    "category": "Source Code Escrow",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "source_code_escrow__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Source Code Escrow\" that should be reviewed by a lawyer. Details: Is one party required to deposit its source code into escrow with a third party, which can be released to the counterparty upon the occurrence of certain events (bankruptcy,  insolvency, etc.)?",
+    "category": "Source Code Escrow",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "termination_for_convenience__short",
+    "q": "Termination For Convenience",
+    "category": "Termination For Convenience",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "termination_for_convenience__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Termination For Convenience\" that should be reviewed by a lawyer. Details: Can a party terminate this  contract without cause (solely by giving a notice and allowing a waiting  period to expire)?",
+    "category": "Termination For Convenience",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "third_party_beneficiary__short",
+    "q": "Third Party Beneficiary",
+    "category": "Third Party Beneficiary",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "third_party_beneficiary__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Third Party Beneficiary\" that should be reviewed by a lawyer. Details: Is there a non-contracting party who is a beneficiary to some or all of the clauses in the contract and therefore can enforce its rights against a contracting party?",
+    "category": "Third Party Beneficiary",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "uncapped_liability__short",
+    "q": "Uncapped Liability",
+    "category": "Uncapped Liability",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "uncapped_liability__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Uncapped Liability\" that should be reviewed by a lawyer. Details: Is a party’s liability uncapped upon the breach of its obligation in the contract? This also includes uncap liability for a particular type of breach such as IP infringement or breach of confidentiality obligation.",
+    "category": "Uncapped Liability",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "unlimited_all_you_can_eat_license__short",
+    "q": "Unlimited/All-You-Can-Eat-License",
+    "category": "Unlimited/All-You-Can-Eat-License",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "unlimited_all_you_can_eat_license__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Unlimited/All-You-Can-Eat-License\" that should be reviewed by a lawyer. Details: Is there a clause granting one party an “enterprise,” “all you can eat” or unlimited usage license?",
+    "category": "Unlimited/All-You-Can-Eat-License",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "volume_restriction__short",
+    "q": "Volume Restriction",
+    "category": "Volume Restriction",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "volume_restriction__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Volume Restriction\" that should be reviewed by a lawyer. Details: Is there a fee increase or consent requirement, etc. if one party’s use of the product/services exceeds certain threshold?",
+    "category": "Volume Restriction",
+    "form": "question",
+    "doc": null
+  },
+  {
+    "id": "warranty_duration__short",
+    "q": "Warranty Duration",
+    "category": "Warranty Duration",
+    "form": "short",
+    "doc": null
+  },
+  {
+    "id": "warranty_duration__question",
+    "q": "Highlight the parts (if any) of this contract related to \"Warranty Duration\" that should be reviewed by a lawyer. Details: What is the duration of any  warranty against defects or errors in technology, products, or services  provided under the contract?",
+    "category": "Warranty Duration",
+    "form": "question",
+    "doc": null
+  }
+]

@@ -13,53 +13,53 @@ from qdrant_client.models import PointStruct
 logger = logging.getLogger(__name__)
 
 
+_SCROLL_PAGE_SIZE = 512
+
+
 def get_unique_documents(client: QdrantClient, collection_name: str) -> List[Dict]:
     """
     Get list of unique documents (contracts) from Qdrant collection.
 
+    Streams points in pages of `_SCROLL_PAGE_SIZE`, aggregating by `title` as it
+    goes so the full payload list never has to live in memory at once.
+
     Returns:
-        List of dicts with document metadata: title, word_count, chunk_count, pdf_path
+        List of dicts with document metadata: title, chunk_count, total_chars, pdf_path
     """
     try:
-        # Check if collection exists
         try:
-            collection_info = client.get_collection(collection_name)
+            client.get_collection(collection_name)
         except Exception as e:
             logger.error("Collection '%s' not found: %s", collection_name, e)
             return []
 
-        # Retrieve all points (with pagination if collection is large)
-        scroll_results, _ = client.scroll(
-            collection_name=collection_name,
-            limit=10000,
-            with_payload=True,
-            with_vectors=False,
-        )
-
-        # Aggregate by title to get unique documents
         doc_map: Dict[str, Dict] = {}
-        for point in scroll_results:
-            payload = point.payload
-            title = payload.get("title")
-            if title and title not in doc_map:
-                doc_map[title] = {
+        offset = None
+        while True:
+            points, offset = client.scroll(
+                collection_name=collection_name,
+                limit=_SCROLL_PAGE_SIZE,
+                with_payload=["title", "pdf_path", "text"],
+                with_vectors=False,
+                offset=offset,
+            )
+            for point in points:
+                payload = point.payload or {}
+                title = payload.get("title")
+                if not title:
+                    continue
+                entry = doc_map.setdefault(title, {
                     "title": title,
                     "pdf_path": payload.get("pdf_path"),
                     "chunk_count": 0,
                     "total_chars": 0,
-                }
-            if title:
-                doc_map[title]["chunk_count"] += 1
-                text = payload.get("text", "")
-                doc_map[title]["total_chars"] += len(text)
+                })
+                entry["chunk_count"] += 1
+                entry["total_chars"] += len(payload.get("text", ""))
+            if offset is None:
+                break
 
-        # Convert to list and sort
-        documents = sorted(
-            doc_map.values(),
-            key=lambda x: x["title"],
-        )
-
-        return documents
+        return sorted(doc_map.values(), key=lambda x: x["title"])
 
     except Exception as e:
         logger.error("Failed to get documents: %s", e)
@@ -82,30 +82,39 @@ def get_document_info(
     Returns:
         Dict with document stats or None if not found
     """
-    scroll_results, _ = client.scroll(
-        collection_name=collection_name,
-        limit=10000,
-        with_payload=True,
-        with_vectors=False,
-    )
+    # Server-side filter on `title` (keyword-indexed) — pulls only matching points,
+    # instead of scanning the whole collection client-side.
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
 
     doc_info = None
-    for point in scroll_results:
-        payload = point.payload
-        if payload.get("title") == document_title:
+    offset = None
+    title_filter = Filter(
+        must=[FieldCondition(key="title", match=MatchValue(value=document_title))]
+    )
+    while True:
+        points, offset = client.scroll(
+            collection_name=collection_name,
+            scroll_filter=title_filter,
+            limit=_SCROLL_PAGE_SIZE,
+            with_payload=["doc_id", "page_start", "page_end", "text", "pdf_path"],
+            with_vectors=False,
+            offset=offset,
+        )
+        for point in points:
+            payload = point.payload or {}
             if doc_info is None:
                 doc_info = {
                     "title": document_title,
                     "pdf_path": payload.get("pdf_path"),
                     "chunks": [],
                 }
-            doc_info["chunks"].append(
-                {
-                    "doc_id": payload.get("doc_id"),
-                    "page_start": payload.get("page_start"),
-                    "page_end": payload.get("page_end"),
-                    "char_count": len(payload.get("text", "")),
-                }
-            )
+            doc_info["chunks"].append({
+                "doc_id": payload.get("doc_id"),
+                "page_start": payload.get("page_start"),
+                "page_end": payload.get("page_end"),
+                "char_count": len(payload.get("text", "")),
+            })
+        if offset is None:
+            break
 
     return doc_info

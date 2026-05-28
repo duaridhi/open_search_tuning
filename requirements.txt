@@ -22,3 +22,10 @@ nltk>=3.8.0
 numpy>=1.24.0
 httpx>=0.24.0
 
+# HuggingFace Hub + Inference (used by app.py, chat_hf.py, hf_utils.py).
+# huggingface_hub >= 1.12 pulls in typer, which needs click >= 8.2 (TyperChoice
+# subscripts click.Choice). Pin to avoid the "type 'Choice' is not subscriptable"
+# regression when click 8.1.x gets resolved transitively.
+huggingface_hub>=0.23.0
+click>=8.2
+

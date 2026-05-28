@@ -7,14 +7,17 @@ No local embedding service required.
 
 import logging
 import os
+import re
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Tuple
+
+import numpy as np
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 from qdrant_cluster_connect import get_qdrant_client, get_cluster_info
 
-from huggingface_hub import InferenceClient
-import requests
+from sentence_transformers import SentenceTransformer, CrossEncoder
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -23,16 +26,15 @@ env_path = Path(__file__).parent / ".env"
 load_dotenv(env_path)
 # Configuration
 COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "cuad_contracts")
-HF_TOKEN = os.getenv("HF_TOKEN")
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-RERANKER_MODEL_ID = "BAAI/bge-reranker-v2-m3"
+RERANKER_MODEL_ID = os.getenv("RERANKER_MODEL_ID", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-if not HF_TOKEN:
-	raise RuntimeError("HF_TOKEN environment variable must be set for HuggingFace Inference API.")
-
-# Initialize inference client
-logger.info("Initializing HuggingFace Inference client")
-client = InferenceClient(provider="hf-inference", api_key=HF_TOKEN)
+# Load models at module import — uvicorn loads the app once per worker.
+# First load downloads the weights to HF cache (~90 MB embedder + ~80 MB reranker).
+logger.info("Loading local embedding model: %s", EMBEDDING_MODEL_NAME)
+_embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
+logger.info("Loading local CrossEncoder reranker: %s", RERANKER_MODEL_ID)
+_reranker = CrossEncoder(RERANKER_MODEL_ID, max_length=256)
 
 def init_qdrant():
 	return get_qdrant_client()
@@ -40,80 +42,46 @@ def init_qdrant():
 def get_client():
 	return get_qdrant_client()
 
+@lru_cache(maxsize=1024)
+def _embed_query_cached(query: str) -> tuple[float, ...]:
+	_t0 = time.perf_counter()
+	vec = _embedder.encode(query, normalize_embeddings=True)
+	logger.info("Local embedder produced %d-d vector in %.3fs", len(vec), time.perf_counter() - _t0)
+	return tuple(float(x) for x in vec)
+
+
 def embed_query(query: str) -> list[float]:
 	try:
-		# Use HuggingFace Inference API for embeddings
-		_t0 = time.perf_counter()
-		response = client.feature_extraction(
-			query,
-			model=EMBEDDING_MODEL_NAME,
-		)
-		logger.info("HuggingFace feature extraction API responded in %.2fs", time.perf_counter() - _t0)
-		# Accept both a flat list (single embedding) and a list of lists (batch), handle numpy types
-		import numpy as np
-		def to_float_list(arr):
-			if isinstance(arr, np.ndarray):
-				return arr.astype(float).tolist()
-			elif isinstance(arr, list):
-				return [float(x) for x in arr]
-			else:
-				raise TypeError(f"Unexpected embedding type: {type(arr)}")
-
-		if isinstance(response, (list, np.ndarray)) and len(response) > 0:
-			# Flat list or numpy array: single embedding
-			if all(isinstance(x, (float, int, np.floating, np.integer)) for x in response):
-				return to_float_list(response)
-			elif all(isinstance(x, (list, np.ndarray)) for x in response):
-				# List of lists: batch
-				return to_float_list(response[0])
-		raise RuntimeError(f"Empty or invalid embedding response from HF Inference API: {response}")
+		return list(_embed_query_cached(query))
 	except Exception as e:
-		logger.error("Failed to embed query via HF Inference API: %s", e)
+		logger.error("Failed to embed query locally: %s", e)
 		raise
 
+@lru_cache(maxsize=256)
 def highlight_text(query: str, document: str):
 	"""
-	Use HuggingFace Inference API reranker model to identify the most relevant sentences.
-	The BAAI/bge-reranker-v2-m3 model scores query-sentence pairs for semantic relevance.
+	Identify the most relevant sentences in `document` for `query` using a local
+	CrossEncoder reranker. Scores are sigmoid-normalized so the 0.5 threshold
+	remains semantically "more relevant than not."
 	"""
 	try:
-		import re
-		import numpy as np
-		
 		# Split document into sentences (handle common delimiters)
 		sentences = re.split(r'(?<=[.!?])\s+', document.strip())
 		sentences = [s.strip() for s in sentences if s.strip()]
-		
+
 		if not sentences:
 			return {"highlighted_sentences": [], "highlight_sentence_indexes": [], "highlight_offsets": []}
-		
-		# Score each sentence using the reranker
-		sentence_scores = []
+
+		# Score all sentences in a single batched local forward pass
 		_reranker_t0 = time.perf_counter()
-		
-		for i, sentence in enumerate(sentences):
-			try:
-				# Use HF Inference API text_classification with the reranker model
-				result = client.text_classification(
-					f"{query} [SEP] {sentence}",
-					model=RERANKER_MODEL_ID,
-				)
-				
-				# Extract the relevance score
-				# The model returns a list with label and score
-				if result and isinstance(result, list) and len(result) > 0:
-					score = result[0].get("score", 0.0)
-				else:
-					score = 0.0
-				
-				sentence_scores.append(score)
-				
-			except Exception as e:
-				logger.warning("Failed to score sentence %d: %s", i + 1, e)
-				sentence_scores.append(0.0)
-		
+		try:
+			raw_scores = _reranker.predict([(query, s) for s in sentences], batch_size=32)
+			sentence_scores = (1.0 / (1.0 + np.exp(-np.asarray(raw_scores, dtype=np.float32)))).tolist()
+		except Exception as e:
+			logger.warning("Local CrossEncoder failed: %s", e)
+			sentence_scores = [0.0] * len(sentences)
 		logger.info(
-			"HuggingFace reranker API scored %d sentences in %.2fs",
+			"Local CrossEncoder scored %d sentences in %.3fs",
 			len(sentences),
 			time.perf_counter() - _reranker_t0,
 		)
@@ -121,37 +89,37 @@ def highlight_text(query: str, document: str):
 		# Find top-scoring sentences (above threshold)
 		threshold = 0.5
 		highlighted_pairs = [(i, sentence, score) for i, (sentence, score) in enumerate(zip(sentences, sentence_scores)) if score >= threshold]
-		
+
 		# Sort by score descending
 		highlighted_pairs.sort(key=lambda x: x[2], reverse=True)
-		
+
 		# Limit to top 5 most relevant sentences
 		top_k = 5
 		highlighted_pairs = highlighted_pairs[:top_k]
-		
+
 		# Calculate character offsets in original document
 		highlight_offsets = []
 		current_pos = 0
 		sentence_positions = {}
-		
+
 		for i, sentence in enumerate(sentences):
 			pos = document.find(sentence, current_pos)
 			if pos != -1:
 				sentence_positions[i] = (pos, pos + len(sentence))
 				current_pos = pos + len(sentence)
-		
+
 		highlighted_sentences = []
 		highlight_sentence_indexes = []
-		
+
 		for sent_idx, sentence, score in highlighted_pairs:
 			highlighted_sentences.append(sentence)
 			highlight_sentence_indexes.append(sent_idx)
 			if sent_idx in sentence_positions:
 				start, end = sentence_positions[sent_idx]
 				highlight_offsets.append((start, end))
-		
+
 		avg_score = np.mean([s[2] for s in highlighted_pairs]) if highlighted_pairs else 0.0
-		
+
 		return {
 			"highlighted_sentences": highlighted_sentences,
 			"highlight_sentence_indexes": highlight_sentence_indexes,
@@ -167,6 +135,7 @@ def semantic_search(
 	top_k: int = 10,
 	document_name: Optional[str] = None,
 	min_score: float = 0.0,
+	highlight: bool = True,
 ) -> Tuple[list[dict], dict]:
 	try:
 		client_qdrant = get_client()
@@ -190,10 +159,15 @@ def semantic_search(
 				text = payload.get("text", "")
 				title = payload.get("title", "Unknown")
 				chunk_page_offset_start = payload.get("page_offset_start", 0)
-				highlights_response = highlight_text(query, text)
-				highlighted_sentences = highlights_response.get("highlighted_sentences", [])
-				highlight_sentence_indexes = highlights_response.get("highlight_sentence_indexes", [])
-				highlight_offsets = highlights_response.get("highlight_offsets", [])
+				if highlight:
+					highlights_response = highlight_text(query, text)
+					highlighted_sentences = highlights_response.get("highlighted_sentences", [])
+					highlight_sentence_indexes = highlights_response.get("highlight_sentence_indexes", [])
+					highlight_offsets = highlights_response.get("highlight_offsets", [])
+				else:
+					highlighted_sentences = []
+					highlight_sentence_indexes = []
+					highlight_offsets = []
 				highlight_page_offset_starts = []
 				highlight_page_offset_ends = []
 				for chunk_start, chunk_end in highlight_offsets:
@@ -237,8 +211,12 @@ def hybrid_search(
 	top_k: int = 10,
 	document_name: Optional[str] = None,
 	min_score: float = 0.0,
+	highlight: bool = True,
 ) -> Tuple[list[dict], dict]:
-	return semantic_search(query=query, top_k=top_k, document_name=document_name, min_score=min_score)
+	return semantic_search(
+		query=query, top_k=top_k, document_name=document_name,
+		min_score=min_score, highlight=highlight,
+	)
 
 def search(
 	query: str,
@@ -246,14 +224,29 @@ def search(
 	document_name: Optional[str] = None,
 	strategy: str = "semantic_search",
 	min_score: float = 0.0,
+	highlight: bool = True,
 ) -> Tuple[list[dict], dict]:
 	top_k = max(1, min(top_k, 100))
 	if strategy == "hybrid_search":
-		return hybrid_search(query=query, top_k=top_k, document_name=document_name, min_score=min_score)
+		return hybrid_search(
+			query=query, top_k=top_k, document_name=document_name,
+			min_score=min_score, highlight=highlight,
+		)
 	else:
-		return semantic_search(query=query, top_k=top_k, document_name=document_name, min_score=min_score)
+		return semantic_search(
+			query=query, top_k=top_k, document_name=document_name,
+			min_score=min_score, highlight=highlight,
+		)
+
+_STATS_CACHE: dict = {"value": None, "ts": 0.0}
+_STATS_TTL_SECONDS = float(os.getenv("STATS_CACHE_TTL", "30"))
+
 
 def get_collection_stats() -> dict:
+	now = time.monotonic()
+	cached = _STATS_CACHE["value"]
+	if cached is not None and (now - _STATS_CACHE["ts"]) < _STATS_TTL_SECONDS:
+		return cached
 	try:
 		client = get_client()
 		collection_info = client.get_collection(COLLECTION_NAME)
@@ -275,15 +268,19 @@ def get_collection_stats() -> dict:
 							distance = getattr(vectors_config, "distance", None)
 		except Exception as e:
 			logger.debug("Could not extract vector config: %s", e)
-		return {
+		result = {
 			"collection": COLLECTION_NAME,
 			"points_count": points_count,
 			"vector_size": vector_size,
 			"distance": str(distance) if distance else "unknown",
 			"status": "ready" if points_count is not None else "ready",
 		}
+		_STATS_CACHE["value"] = result
+		_STATS_CACHE["ts"] = now
+		return result
 	except Exception as e:
 		logger.error("Failed to get collection stats: %s: %s", type(e).__name__, e)
+		# Don't cache errors — let the next call retry.
 		return {
 			"collection": COLLECTION_NAME,
 			"status": "error",

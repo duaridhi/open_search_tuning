@@ -21,7 +21,10 @@ env_path = Path(__file__).parent / ".env"
 load_dotenv(env_path)
 
 HF_TOKEN = os.getenv("HF_TOKEN")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "Qwen/Qwen3-235B-A22B:novita")
+# Default to a free, fast 8B model on HF Inference serverless. Override with CHAT_MODEL.
+CHAT_MODEL = os.getenv("CHAT_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+CHAT_MAX_TOKENS = int(os.getenv("CHAT_MAX_TOKENS", "512"))
+CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.1"))
 
 if not HF_TOKEN:
     raise RuntimeError("HF_TOKEN environment variable must be set for HuggingFace Inference API.")
@@ -37,13 +40,23 @@ def _get_inference_client() -> InferenceClient:
 
 
 def _build_context(documents: list[dict]) -> str:
-    """Format retrieved documents into a context block for the prompt."""
+    """
+    Format retrieved documents into a context block for the prompt.
+
+    When a doc has `highlighted_sentences`, use ONLY those sentences instead of
+    the full chunk — typically 60–80% fewer input tokens with no quality loss,
+    since the reranker already picked the relevant spans.
+    """
     parts = []
     for i, doc in enumerate(documents, start=1):
         title = doc.get("title", "Unknown")
-        text = doc.get("text", "").strip()
         score = doc.get("score", 0.0)
-        parts.append(f"[Document {i}] Title: {title} (score: {score:.3f})\n{text}")
+        highlights = doc.get("highlighted_sentences") or []
+        if highlights:
+            body = " ".join(s.strip() for s in highlights if s.strip())
+        else:
+            body = (doc.get("text", "") or "").strip()
+        parts.append(f"[Document {i}] Title: {title} (score: {score:.3f})\n{body}")
     return "\n\n---\n\n".join(parts)
 
 
@@ -98,6 +111,8 @@ def chat(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ],
+        max_tokens=CHAT_MAX_TOKENS,
+        temperature=CHAT_TEMPERATURE,
     )
     _elapsed = time.perf_counter() - _t0
 

@@ -291,6 +291,10 @@ async def search_contracts(
         "semantic_search",
         description="Search strategy: semantic_search or hybrid_search",
     ),
+    highlight: bool = Query(
+        True,
+        description="If false, skip per-sentence reranking and return chunks without highlights. Faster.",
+    ),
 ) -> SearchResponse:
     """
     Search contracts using semantic similarity (vector search).
@@ -300,11 +304,15 @@ async def search_contracts(
       - top_k: Number of results (1-100, default: 10)
       - document_name: Optional filter by contract title
       - strategy: Search strategy (semantic_search or hybrid_search)
+      - highlight: Whether to compute per-sentence highlights (default: true)
 
     Returns:
       List of matching contract chunks with scores, metadata, and HuggingFace Hub PDF URLs.
     """
-    logger.info(f"Search request: query='{q}', top_k={top_k}, document_name={document_name}, strategy={strategy}")
+    logger.info(
+        f"Search request: query='{q}', top_k={top_k}, document_name={document_name}, "
+        f"strategy={strategy}, highlight={highlight}"
+    )
     try:
         try:
             results, metadata = await asyncio.wait_for(
@@ -314,6 +322,8 @@ async def search_contracts(
                     top_k,
                     document_name,
                     strategy,
+                    0.0,
+                    highlight,
                 ),
                 timeout=SEARCH_TIMEOUT
             )

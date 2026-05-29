@@ -90,7 +90,7 @@ for pdf_file in pdf_list:
     basename = os.path.basename(pdf_file)
     # Normalize extension to lowercase .pdf
     stem, ext = os.path.splitext(basename)
-    basename = stem + ext.lower()
+    basename = stem.strip() + ext.lower()
     repo_path = "raw/" + basename
 
     # Skip files already in the repository

@@ -343,7 +343,7 @@ async def search_contracts(
         search_results = []
         for r in results:
             # Generate HF Hub URL: format is "raw/{title}.pdf"
-            hf_path = f"raw/{r['title']}.pdf"
+            hf_path = f"raw/{r['title'].strip()}.pdf"
             pdf_url = generate_hf_url(hf_path)
             
             search_results.append(
@@ -586,7 +586,7 @@ async def chat_endpoint(request: ChatRequest, response: Response = None) -> Chat
 
         sources = []
         for r in results:
-            hf_path = f"raw/{r['title']}.pdf"
+            hf_path = f"raw/{r['title'].strip()}.pdf"
             pdf_url = generate_hf_url(hf_path)
             sources.append(
                 SearchResult(

@@ -87,6 +87,33 @@ contract as having **no relevant chunk** for that category, and any retrieval
 result that returns a chunk from such a contract for the corresponding query
 will contribute to false positives in Precision@k.
 
+### 2.4 Ground-truth projections
+
+The same underlying spans are projected into three artifacts at different
+granularities. The **contract-level** projection (`gold_contracts.json`) is
+the primary signal for cross-contract retrieval — "did `/search` surface a
+contract that actually has this clause?" — and is robust to chunk-boundary
+artifacts where the chunker's `char_start`/`char_end` may not align 1:1
+with CUAD's `answer_start` coordinate system (the chunker indexes PDF-
+extracted text, CUAD's spans index its own `context` string; they overlap
+in the prefix but drift in long documents). The **chunk-level** projection
+(`gold.json`) is the within-document highlight signal — "given a chunk we
+retrieved, does it contain a CUAD-annotated span?" — and is intentionally
+strict. The **span-level** projection (`gold_spans.json`) preserves the
+raw annotated text + character offsets per (query, document) for a future
+highlight-quality eval.
+
+| File | Granularity | Key | Value |
+| --- | --- | --- | --- |
+| `gold.json` | Qdrant chunk | `qid` | `list[point_id]` overlapping any span of the query's category. |
+| `gold_contracts.json` | Contract title | `qid` | `{category, form, relevant_titles, total_relevant}` — titles with ≥1 nonempty span of `category`, restricted to titles ingested in Qdrant. |
+| `gold_spans.json` | Raw CUAD span | `qid` | `{category, form, spans_by_document: {title: [{answer_text (≤300 chars), char_start, char_end}, ...]}}` — for future highlight-hit eval, unused by `run_eval.py` today. |
+
+`run_eval.py` consumes the first two and reports `chunk_metrics` and
+`contract_metrics` side by side. Contract metrics treat the rank-ordered
+top-k titles (with duplicates preserved at their original ranks) as the
+retrieved list; recall denominator is `total_relevant`.
+
 ---
 
 ## 3. Query construction

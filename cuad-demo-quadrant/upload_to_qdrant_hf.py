@@ -1,61 +1,68 @@
 # %% Imports & docstring
 """
-upload_to_qdrant.py
-───────────────────
-Extracts text from CUAD PDF contracts, generates embeddings with
-all-MiniLM-L6-v2, and uploads chunks to a Qdrant collection named
-'cuad_contracts'.
+upload_to_qdrant_hf.py
+───────────────────────
+Same as upload_to_qdrant.py but uses the HuggingFace Inference API for
+embeddings instead of a local sentence-transformers model.  No local GPU/RAM
+cost for the embedding step — embeddings are generated server-side.
 
-Text source: PDFs (via pymupdf → pdfplumber → pdfminer fallback).  Using
-PDFs as the source is required because the UI uses char_start/char_end to
-locate and highlight text inside the rendered PDF at query time.  TXT-file
-offsets would produce drift relative to PDF rendering and break highlighting.
+Advantages over upload_to_qdrant.py:
+  - Large models (gte-Qwen2-1.5B-instruct, E5-mistral-7B-instruct, …) work
+    without downloading or fitting in local RAM.
+  - No CUDA/PyTorch dependency for ingest.
 
-Truncation-bug fix (previously pages were silently dropped):
-  The original code filtered out empty pages before building the page map:
-      pages = [p for p in pages if p["text"].strip()]
-  When a mid-document page extracts as empty (scanned page, complex layout,
-  encoding issue), removing it compressed the char positions of all subsequent
-  pages, causing char_end of the last chunk to be shorter than the true
-  document length.  Gaps of up to 63,731 characters were measured on specific
-  contracts.
+Limitations:
+  - Requires HF_TOKEN with Inference API access.
+  - Rate-limited by the HuggingFace free tier; reduce ENCODE_BATCH_SIZE (to
+    8 or 4) and add ENCODE_SLEEP_S if you get 429 errors.
+  - Only models whose feature-extraction endpoint returns pooled sentence
+    embeddings produce correct results.  Models that return token-level
+    embeddings need explicit mean-pooling and are not suitable here without
+    modification.  Safe families: sentence-transformers/*, Alibaba-NLP/gte-*,
+    BAAI/bge-*, intfloat/e5-*, nomic-ai/nomic-embed-text-*.
 
-  Fix: empty pages are now kept and only a warning is emitted.  The full_text
-  join and page_map are built over ALL pages so char positions are continuous
-  and page_start/page_end/page_offset_* remain correct.
+Text source: PDFs (same as upload_to_qdrant.py — PDF char offsets are
+required by the UI for highlight rendering).
 
 Usage
 ─────
-    python upload_to_qdrant.py
+    python cuad-demo-quadrant/upload_to_qdrant_hf.py
 
-Environment (loaded from .env in this directory)
-─────────────────────────────────────────────────
+Environment (loaded from .env in cuad-demo-quadrant/)
+──────────────────────────────────────────────────────
+    HF_TOKEN        – required; HuggingFace Inference API token
     QDRANT_URL      – Local Qdrant URL (default: http://localhost:6333)
-    CLUSTER_URL     – Qdrant Cloud cluster URL (takes precedence over QDRANT_URL)
+    CLUSTER_URL     – Qdrant Cloud cluster URL (takes precedence)
     QDRANT_API_KEY  – Cloud API key
     PDF_ROOT        – override path to full_contract_pdf/ directory
 
 Optional env vars
 ─────────────────
-    MAX_DOCS         – max chunks to upload (default: 1000)
-    CHUNK_SIZE       – characters per chunk  (default: 500)
-    CHUNK_OVERLAP    – overlap between chunks (default: 50)
-    ENCODE_BATCH_SIZE– embedding batch size   (default: 32)
-    UPLOAD_BATCH_SIZE– upsert batch size       (default: 100)
+    EMBED_MODEL       – HF model repo ID  (default: sentence-transformers/all-MiniLM-L6-v2)
+    VECTOR_SIZE       – embedding dim; auto-detected via probe call if not set
+    DOC_OFFSET        – skip first N PDFs alphabetically (default: 0)
+    DOC_COUNT         – max PDFs to process, 0 = no limit (default: 0)
+    MAX_DOCS          – max chunks to upload (default: 500000)
+    CHUNK_SIZE        – characters per chunk (default: 500)
+    CHUNK_OVERLAP     – overlap between chunks (default: 50)
+    ENCODE_BATCH_SIZE – texts per API call (default: 32; lower to 8 if rate-limited)
+    ENCODE_SLEEP_S    – seconds to sleep between API calls (default: 0)
+    UPLOAD_BATCH_SIZE – Qdrant upsert batch size (default: 100)
+    SKIP_INGESTED_DOCS– skip titles already in Qdrant (default: 1)
 """
 
 import logging
 import os
-import sys
+import time
 import uuid
 from pathlib import Path
 
+import numpy as np
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
-from qdrant_client.models import Distance, VectorParams, PointStruct, PayloadSchemaType
+import requests
+from qdrant_client.models import Distance, PayloadSchemaType, PointStruct, SparseVector, SparseVectorParams, VectorParams
 from tqdm import tqdm
 
-# Import cluster connection
 from qdrant_cluster_connect import get_qdrant_client
 
 logging.basicConfig(
@@ -70,42 +77,153 @@ logger.info("Imports loaded successfully.")
 # %% Configuration — load .env and set constants
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-COLLECTION_NAME   = os.getenv("QDRANT_COLLECTION", "cuad_contracts")
-EMBED_MODEL       = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
-DOC_OFFSET        = int(os.getenv("DOC_OFFSET", "0"))
-DOC_COUNT         = int(os.getenv("DOC_COUNT", "0"))   # 0 = no doc-count limit
+COLLECTION_NAME    = os.getenv("QDRANT_COLLECTION", "cuad_contracts")
+EMBED_MODEL        = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+DOC_OFFSET         = int(os.getenv("DOC_OFFSET", "0"))
+DOC_COUNT          = int(os.getenv("DOC_COUNT", "0"))   # 0 = no doc-count limit
 
-MAX_DOCS          = int(os.getenv("MAX_DOCS", "500000"))  # effectively uncapped for full CUAD corpus
-CHUNK_SIZE        = int(os.getenv("CHUNK_SIZE", "500"))
-CHUNK_OVERLAP     = int(os.getenv("CHUNK_OVERLAP", "50"))
-ENCODE_BATCH_SIZE = int(os.getenv("ENCODE_BATCH_SIZE", "32"))
-UPLOAD_BATCH_SIZE = int(os.getenv("UPLOAD_BATCH_SIZE", "100"))
+MAX_DOCS           = int(os.getenv("MAX_DOCS", "500000"))
+CHUNK_SIZE         = int(os.getenv("CHUNK_SIZE", "500"))
+CHUNK_OVERLAP      = int(os.getenv("CHUNK_OVERLAP", "50"))
+ENCODE_BATCH_SIZE  = int(os.getenv("ENCODE_BATCH_SIZE", "32"))
+ENCODE_SLEEP_S     = float(os.getenv("ENCODE_SLEEP_S", "0"))
+UPLOAD_BATCH_SIZE  = int(os.getenv("UPLOAD_BATCH_SIZE", "100"))
 SKIP_INGESTED_DOCS = os.getenv("SKIP_INGESTED_DOCS", "1").lower() not in ("0", "false", "no")
-# Optional: "float16" or "bfloat16" to halve model RAM at the cost of precision.
-# Useful for large models (>500M params) on memory-constrained machines.
-MODEL_DTYPE       = os.getenv("MODEL_DTYPE", "")  # "" = use model default (float32)
+ENABLE_HYBRID    = os.getenv("ENABLE_HYBRID", "0").lower() not in ("0", "false", "no")
+SPARSE_MODEL_NAME = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
 
 _CUAD_DATA_BASE = Path(
     "/home/ridhi/projects/project1/open_search_tuning"
     "/cuad_opensearch/cuad_data/CUAD_v1"
 )
-
 PDF_ROOT = Path(os.getenv("PDF_ROOT", str(_CUAD_DATA_BASE / "full_contract_pdf")))
+
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+if not HF_TOKEN:
+    raise EnvironmentError("HF_TOKEN is required for the HF Inference API ingest path.")
 
 logger.info(
     "Config loaded: COLLECTION=%s  EMBED_MODEL=%s  DOC_OFFSET=%d  DOC_COUNT=%d  MAX_DOCS=%d  "
-    "CHUNK_SIZE=%d  CHUNK_OVERLAP=%d  ENCODE_BATCH=%d  UPLOAD_BATCH=%d  MODEL_DTYPE=%s  PDF_ROOT_EXISTS=%s",
+    "CHUNK_SIZE=%d  CHUNK_OVERLAP=%d  ENCODE_BATCH=%d  SLEEP=%ss  UPLOAD_BATCH=%d  PDF_ROOT_EXISTS=%s",
     COLLECTION_NAME, EMBED_MODEL, DOC_OFFSET, DOC_COUNT, MAX_DOCS,
-    CHUNK_SIZE, CHUNK_OVERLAP, ENCODE_BATCH_SIZE, UPLOAD_BATCH_SIZE,
-    MODEL_DTYPE or "default", PDF_ROOT.exists(),
+    CHUNK_SIZE, CHUNK_OVERLAP, ENCODE_BATCH_SIZE, ENCODE_SLEEP_S, UPLOAD_BATCH_SIZE, PDF_ROOT.exists(),
 )
 
-# %% Load embedding model (early — VECTOR_SIZE must be known before collection creation)
-logger.info("Loading embedding model: %s  dtype=%s", EMBED_MODEL, MODEL_DTYPE or "default")
-_model_kwargs = {"torch_dtype": MODEL_DTYPE} if MODEL_DTYPE else {}
-model = SentenceTransformer(EMBED_MODEL, device="cpu", model_kwargs=_model_kwargs)
-VECTOR_SIZE = model.get_sentence_embedding_dimension()
-logger.info("Model loaded. Embedding dim: %d  Max seq length: %d", VECTOR_SIZE, model.max_seq_length)
+# %% HF Inference API — direct HTTP, no provider routing layer
+HF_PROVIDER = os.getenv("HF_PROVIDER", "hf-inference")
+_HF_EMBED_URL = f"https://router.huggingface.co/{HF_PROVIDER}/models/{EMBED_MODEL}/pipeline/feature-extraction"
+_HF_EMBED_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
+
+
+_HF_EMBED_URL_V1 = f"https://router.huggingface.co/{HF_PROVIDER}/v1/embeddings"
+
+
+def _hf_api_embed(texts: list[str]) -> list:
+    # Try pipeline/feature-extraction first; fall back to OpenAI-compatible
+    # /v1/embeddings (used by Scaleway and other TEI-backed providers).
+    resp = requests.post(
+        _HF_EMBED_URL,
+        headers=_HF_EMBED_HEADERS,
+        json={"inputs": texts},
+        timeout=60,
+    )
+    if resp.status_code == 400:
+        logger.debug("feature-extraction 400 body: %s", resp.text[:300])
+        resp2 = requests.post(
+            _HF_EMBED_URL_V1,
+            headers=_HF_EMBED_HEADERS,
+            json={"model": EMBED_MODEL, "input": texts},
+            timeout=60,
+        )
+        if resp2.ok:
+            data = resp2.json()
+            # OpenAI format: {"data": [{"embedding": [...], "index": 0}, ...]}
+            return [item["embedding"] for item in sorted(data["data"], key=lambda x: x["index"])]
+        logger.debug("/v1/embeddings %d body: %s", resp2.status_code, resp2.text[:300])
+    resp.raise_for_status()
+    return resp.json()
+
+
+# %% Embedding helper — batched API calls with retry + optional sleep
+
+def _pool(raw) -> np.ndarray:
+    """Convert raw feature_extraction output to a (n_texts, dim) float32 array.
+
+    HF models return one of three shapes:
+      - (n_texts, dim)         — pooled sentence embeddings, use as-is
+      - (n_texts, n_tokens, dim) — token-level, mean-pool over tokens
+      - ragged list of (n_tokens_i, dim) — token-level with variable lengths
+
+    Mean-pooling over tokens is the standard approach for converting a
+    token-level model into sentence embeddings.
+    """
+    if isinstance(raw, np.ndarray):
+        if raw.ndim == 2:
+            return raw.astype(np.float32)
+        if raw.ndim == 3:
+            return raw.mean(axis=1).astype(np.float32)
+
+    # raw is a list; items are either 1-D (pooled) or 2-D (token-level)
+    pooled = []
+    for item in raw:
+        arr = np.array(item, dtype=np.float32)
+        if arr.ndim == 2:       # token-level: (n_tokens, dim) → mean over tokens
+            arr = arr.mean(axis=0)
+        pooled.append(arr)
+    return np.stack(pooled)
+
+
+def _encode(texts: list[str]) -> np.ndarray:
+    """Call HF feature_extraction in sub-batches; return L2-normalised float32 array."""
+    all_embs: list[np.ndarray] = []
+    for i in range(0, len(texts), ENCODE_BATCH_SIZE):
+        batch = texts[i : i + ENCODE_BATCH_SIZE]
+        for attempt in range(3):
+            try:
+                raw = _hf_api_embed(batch)
+                break
+            except Exception as exc:
+                if attempt == 2:
+                    raise
+                wait = 5 * (2 ** attempt)   # 5 s, 10 s
+                logger.warning(
+                    "feature_extraction failed (attempt %d/3): %s — retrying in %ds",
+                    attempt + 1, exc, wait,
+                )
+                time.sleep(wait)
+        all_embs.append(_pool(raw))
+        if ENCODE_SLEEP_S > 0:
+            time.sleep(ENCODE_SLEEP_S)
+
+    result = np.vstack(all_embs)
+    norms = np.linalg.norm(result, axis=1, keepdims=True)
+    result /= np.where(norms == 0, 1.0, norms)
+    return result
+
+
+# %% VECTOR_SIZE detection (needs _pool to be defined first)
+_vector_size_env = os.getenv("VECTOR_SIZE", "")
+if _vector_size_env:
+    VECTOR_SIZE = int(_vector_size_env)
+    logger.info("VECTOR_SIZE from env: %d", VECTOR_SIZE)
+else:
+    logger.info("VECTOR_SIZE not set — probing model with a test embedding ...")
+    _probe = _pool(_hf_api_embed(["probe"]))
+    VECTOR_SIZE = int(_probe.shape[-1])
+    logger.info("Auto-detected VECTOR_SIZE: %d  (output shape: %s)", VECTOR_SIZE, _probe.shape)
+
+
+# %% Sparse model (hybrid search) — loaded only when ENABLE_HYBRID=1
+_sparse_encoder = None
+if ENABLE_HYBRID:
+    try:
+        from fastembed import SparseTextEmbedding
+        logger.info("Loading sparse embedding model: %s", SPARSE_MODEL_NAME)
+        _sparse_encoder = SparseTextEmbedding(model_name=SPARSE_MODEL_NAME)
+        logger.info("Sparse model loaded.")
+    except ImportError:
+        logger.warning("fastembed not installed; ENABLE_HYBRID ignored. pip install fastembed")
+        ENABLE_HYBRID = False
 
 
 # %% PDF extraction backend — auto-selects best available library
@@ -148,9 +266,7 @@ def _make_extractor():
             pages = []
             for i, layout in enumerate(extract_pages(str(path))):
                 text = "".join(
-                    el.get_text()
-                    for el in layout
-                    if isinstance(el, LTTextContainer)
+                    el.get_text() for el in layout if isinstance(el, LTTextContainer)
                 )
                 pages.append({"page": i + 1, "text": text})
             return pages
@@ -197,12 +313,7 @@ def split_text_with_offsets(text: str, chunk_size: int, chunk_overlap: int) -> l
 
 # %% Page-boundary helpers
 def build_page_map(pages: list[dict]) -> list[tuple[int, int, int]]:
-    """Return [(seg_start, seg_end, page_number), ...] for every page.
-
-    The separator between pages is two newline characters (len=2), matching
-    the "\n\n".join() used to build full_text.  ALL pages — including empty
-    ones — must be passed so char positions are continuous.
-    """
+    """Return [(seg_start, seg_end, page_number), ...] for every page."""
     page_map = []
     pos = 0
     for p in pages:
@@ -237,15 +348,7 @@ def find_pdfs(root: Path) -> list[Path]:
 
 
 def iter_chunks(all_pdfs: list[Path], limit: int, skip_titles: set[str] | None = None):
-    """Yield chunk dicts until *limit* chunks have been emitted.
-
-    Empty pages (scanned pages, complex layouts, encoding issues) are kept in
-    the page list so that full_text char positions remain continuous across the
-    entire document.  Silently dropping them was the truncation bug: it
-    compressed char positions of all subsequent pages and left trailing content
-    unindexed.  A warning is emitted instead so operators can see which
-    contracts have problematic pages.
-    """
+    """Yield chunk dicts until *limit* chunks have been emitted."""
     count = 0
     skipped_pdfs = 0
     resumed_pdfs = 0
@@ -263,8 +366,6 @@ def iter_chunks(all_pdfs: list[Path], limit: int, skip_titles: set[str] | None =
             skipped_pdfs += 1
             continue
 
-        # Warn about empty pages but keep them — dropping them shifts all
-        # subsequent char offsets and produces the truncation bug.
         for p in pages:
             if not p["text"].strip():
                 logger.warning(
@@ -289,23 +390,17 @@ def iter_chunks(all_pdfs: list[Path], limit: int, skip_titles: set[str] | None =
             pg_start, pg_end = char_range_to_pages(
                 chunk["char_start"], chunk["char_end"], page_map
             )
-            page_offset_start = char_pos_to_page_offset(
-                chunk["char_start"], pg_start, page_map
-            )
-            page_offset_end = char_pos_to_page_offset(
-                chunk["char_end"], pg_end, page_map
-            )
             yield {
-                "doc_id":     f"{title}-chunk-{chunk_idx}",
-                "title":      title,
-                "text":       chunk["text"],
-                "char_start": chunk["char_start"],
-                "char_end":   chunk["char_end"],
-                "page_start": pg_start,
-                "page_end":   pg_end,
-                "page_offset_start": page_offset_start,
-                "page_offset_end":   page_offset_end,
-                "pdf_path":   rel_path,
+                "doc_id":            f"{title}-chunk-{chunk_idx}",
+                "title":             title,
+                "text":              chunk["text"],
+                "char_start":        chunk["char_start"],
+                "char_end":          chunk["char_end"],
+                "page_start":        pg_start,
+                "page_end":          pg_end,
+                "page_offset_start": char_pos_to_page_offset(chunk["char_start"], pg_start, page_map),
+                "page_offset_end":   char_pos_to_page_offset(chunk["char_end"],   pg_end,   page_map),
+                "pdf_path":          rel_path,
             }
             count += 1
 
@@ -323,11 +418,15 @@ existing = [c.name for c in qdrant.get_collections().collections]
 if COLLECTION_NAME in existing:
     logger.info("Collection '%s' already exists — skipping creation.", COLLECTION_NAME)
 else:
-    qdrant.create_collection(
+    create_kwargs: dict = dict(
         collection_name=COLLECTION_NAME,
         vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
     )
-    logger.info("Collection '%s' created (dim=%d, distance=Cosine).", COLLECTION_NAME, VECTOR_SIZE)
+    if ENABLE_HYBRID:
+        create_kwargs["sparse_vectors_config"] = {"sparse": SparseVectorParams()}
+        logger.info("ENABLE_HYBRID=1: adding sparse vector field to collection schema.")
+    qdrant.create_collection(**create_kwargs)
+    logger.info("Collection '%s' created (dim=%d, distance=Cosine, hybrid=%s).", COLLECTION_NAME, VECTOR_SIZE, ENABLE_HYBRID)
 
 try:
     qdrant.create_payload_index(
@@ -340,10 +439,7 @@ except Exception as exc:
     logger.warning("Could not create keyword index on %s.title: %s", COLLECTION_NAME, exc)
 
 
-# Embedding model loaded in the Config section above.
-
-
-# %% Build resume set — titles already fully indexed (skip on fresh collections)
+# %% Build resume set — titles already fully indexed
 ingested_titles: set[str] = set()
 if SKIP_INGESTED_DOCS and COLLECTION_NAME in existing:
     logger.info("SKIP_INGESTED_DOCS=1: scanning collection for already-ingested titles …")
@@ -383,39 +479,48 @@ logger.info(
 if not all_pdfs:
     raise FileNotFoundError(f"No PDFs found under {PDF_ROOT}. Check PDF_ROOT path.")
 
+
 # %% Encode & upload in batches
 chunk_buffer: list[dict] = []
 uploaded = 0
 errors   = 0
 
+
 def flush_buffer(buf: list[dict]) -> int:
-    """Encode and upsert a batch; returns number of points uploaded."""
-    texts      = [d["text"] for d in buf]
-    embeddings = model.encode(
-        texts,
-        batch_size=ENCODE_BATCH_SIZE,
-        show_progress_bar=False,
-        normalize_embeddings=True,
-    )
-    points = [
-        PointStruct(
+    """Encode via HF API and upsert a batch; returns number of points uploaded."""
+    texts = [d["text"] for d in buf]
+    embeddings = _encode(texts)
+
+    sparse_vecs = None
+    if ENABLE_HYBRID and _sparse_encoder is not None:
+        sparse_vecs = list(_sparse_encoder.embed(texts))
+
+    points = []
+    for i, d in enumerate(buf):
+        if sparse_vecs is not None:
+            sv = sparse_vecs[i]
+            vector = {
+                "": embeddings[i].tolist(),
+                "sparse": SparseVector(indices=sv.indices.tolist(), values=sv.values.tolist()),
+            }
+        else:
+            vector = embeddings[i].tolist()
+        points.append(PointStruct(
             id=str(uuid.uuid5(uuid.NAMESPACE_DNS, d["doc_id"])),
-            vector=embeddings[i].tolist(),
+            vector=vector,
             payload={
-                "doc_id":     d["doc_id"],
-                "title":      d["title"],
-                "text":       d["text"],
-                "char_start": d["char_start"],
-                "char_end":   d["char_end"],
-                "page_start": d["page_start"],
-                "page_end":   d["page_end"],
+                "doc_id":            d["doc_id"],
+                "title":             d["title"],
+                "text":              d["text"],
+                "char_start":        d["char_start"],
+                "char_end":          d["char_end"],
+                "page_start":        d["page_start"],
+                "page_end":          d["page_end"],
                 "page_offset_start": d["page_offset_start"],
                 "page_offset_end":   d["page_offset_end"],
-                "pdf_path":   d["pdf_path"],
+                "pdf_path":          d["pdf_path"],
             },
-        )
-        for i, d in enumerate(buf)
-    ]
+        ))
     qdrant.upsert(collection_name=COLLECTION_NAME, points=points)
     return len(points)
 
@@ -433,7 +538,6 @@ with tqdm(total=MAX_DOCS, desc="Uploading chunks", unit="chunk") as pbar:
                 errors += 1
             chunk_buffer.clear()
 
-    # Flush remainder
     if chunk_buffer:
         logger.info("Flushing final batch of %d chunks ...", len(chunk_buffer))
         try:

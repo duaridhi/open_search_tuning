@@ -2,6 +2,7 @@
 name: rag-eval
 description: Runs a fixed CUAD query set against the live `/search` and `/chat` endpoints, records latency (p50/p95) and snapshots of top-5 highlighted sentences per query, and diffs results against a stored baseline. Use this agent before AND after any model swap, reranker change, prompt edit, or chunking tweak. It is the regression-catcher for the search + RAG path.
 tools: Read, Edit, Write, Bash, Grep, Glob
+isolation: worktree
 ---
 
 # Role

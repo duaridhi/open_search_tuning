@@ -16,6 +16,9 @@ datasets>=2.10.0
 # S3/MinIO & Object Storage
 boto3>=1.26.0
 
+# Sparse embeddings for hybrid search
+fastembed>=0.3.0
+
 # Utilities
 tqdm>=4.66.0
 nltk>=3.8.0

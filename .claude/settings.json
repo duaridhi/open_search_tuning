@@ -1,0 +1,22 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "teammateMode": "tmux",
+  "worktree": {
+    "baseRef": "head"
+  },
+  "permissions": {
+    "deny": [
+      "Read(../)",
+      "Read(../../**)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.gnupg/**)",
+      "Bash(sudo *)",
+      "Bash(rm -rf /*)"
+    ],
+    "defaultMode": "bypassPermissions"
+
+  }
+}

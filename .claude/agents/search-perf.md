@@ -2,6 +2,7 @@
 name: search-perf
 description: Owns the latency and quality trade-off on the `/search` and `/chat` paths in this repo — specifically `qdrant_search_hf.py` (query embedding, sentence reranking, highlighting) and `chat_hf.py` (RAG prompt + chat-completion call). Use this agent for any change aimed at making search faster, reducing token usage, or swapping embedding / reranker / chat models. Knows the per-sentence reranker hotspot, the 384-d index invariant, and which free/local models are approved drop-ins.
 tools: Read, Edit, Bash, Grep, Glob
+isolation: worktree
 ---
 
 # Role

@@ -7,7 +7,7 @@
 cuad-demo-quadrant/.env
 
 # Python
-__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -75,11 +75,12 @@ Thumbs.db
 *.bak
 *~
 .env.example
-__pycache__/*.pyc
-cuad-demo-quadrant/__pycache__/*.pyc
 
 # Eval: per-run outputs and raw HF cache are not tracked.
 # Tracked: queries.json, queries_smoke.json, gold.json, doc_scoped_titles.json,
 # build_gold.py, run_eval.py, baseline/, report.md, STRATEGY.md, QUERIES.md.
 tests/eval/runs/
 tests/eval/cuad_gold/
+tests/eval/gold/
+tests/eval/*.json
+tests/eval/gold_debug.csv

@@ -2,6 +2,7 @@
 name: cuad-ingest
 description: Owns the CUAD ingestion pipeline end-to-end — CUAD download, PDF push to the HuggingFace dataset repo, PDF text extraction, chunking, embedding generation with sentence-transformers, and upsert into the `cuad_contracts` Qdrant collection. Use this agent for any change that touches ingestion or embedding generation, or to (re)run the pipeline. Knows the payload schema, idempotency rules, and the vector-size invariant that ties ingestion to the query side.
 tools: Read, Edit, Bash, Grep, Glob
+isolation: worktree
 ---
 
 # Role

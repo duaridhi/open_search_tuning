@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
-from qdrant_client.models import Filter, FieldCondition, MatchValue
+import requests as _requests
+from qdrant_client.models import Filter, FieldCondition, MatchValue, Prefetch, FusionQuery, Fusion, SparseVector
 from qdrant_cluster_connect import get_qdrant_client, get_cluster_info
 
 from sentence_transformers import SentenceTransformer, CrossEncoder
@@ -28,15 +29,43 @@ env_path = Path(__file__).parent / ".env"
 load_dotenv(env_path)
 # Configuration
 COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "cuad_contracts")
-EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_MODEL_NAME = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 RERANKER_MODEL_ID = os.getenv("RERANKER_MODEL_ID", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+ENABLE_HYBRID = os.getenv("ENABLE_HYBRID", "0").lower() not in ("0", "false", "no")
+SPARSE_MODEL_NAME = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
 
-# Load models at module import — uvicorn loads the app once per worker.
-# First load downloads the weights to HF cache (~90 MB embedder + ~80 MB reranker).
-logger.info("Loading local embedding model: %s", EMBEDDING_MODEL_NAME)
-_embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
+# When HF_PROVIDER is set, embed queries via the HF Inference API instead of
+# loading the model locally — needed for large models (>2 GB) that won't fit in RAM.
+HF_PROVIDER = os.getenv("HF_PROVIDER", "")
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+
+_embedder = None
+_hf_embed_url: str | None = None
+_hf_embed_headers: dict | None = None
+
+if HF_PROVIDER:
+    _hf_embed_url = f"https://router.huggingface.co/{HF_PROVIDER}/models/{EMBEDDING_MODEL_NAME}/pipeline/feature-extraction"
+    _hf_embed_url_v1 = f"https://router.huggingface.co/{HF_PROVIDER}/v1/embeddings"
+    _hf_embed_headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    logger.info("Query embedding via HF API (%s): %s", HF_PROVIDER, EMBEDDING_MODEL_NAME)
+else:
+    _hf_embed_url_v1 = None
+    logger.info("Loading local embedding model: %s", EMBEDDING_MODEL_NAME)
+    _embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
+
 logger.info("Loading local CrossEncoder reranker: %s", RERANKER_MODEL_ID)
 _reranker = CrossEncoder(RERANKER_MODEL_ID, max_length=256)
+
+_sparse_encoder = None
+if ENABLE_HYBRID:
+    try:
+        from fastembed import SparseTextEmbedding
+        logger.info("Loading sparse embedding model: %s", SPARSE_MODEL_NAME)
+        _sparse_encoder = SparseTextEmbedding(model_name=SPARSE_MODEL_NAME)
+        logger.info("Sparse model loaded.")
+    except ImportError:
+        logger.warning("fastembed not installed; ENABLE_HYBRID disabled. pip install fastembed")
+        ENABLE_HYBRID = False
 
 def init_qdrant():
 	return get_qdrant_client()
@@ -47,8 +76,35 @@ def get_client():
 @lru_cache(maxsize=1024)
 def _embed_query_cached(query: str) -> tuple[float, ...]:
 	_t0 = time.perf_counter()
-	vec = _embedder.encode(query, normalize_embeddings=True)
-	logger.info("Local embedder produced %d-d vector in %.3fs", len(vec), time.perf_counter() - _t0)
+	if _hf_embed_url:
+		resp = _requests.post(
+			_hf_embed_url, headers=_hf_embed_headers,
+			json={"inputs": [query]}, timeout=30,
+		)
+		if resp.status_code == 400 and _hf_embed_url_v1:
+			resp2 = _requests.post(
+				_hf_embed_url_v1, headers=_hf_embed_headers,
+				json={"model": EMBEDDING_MODEL_NAME, "input": [query]}, timeout=30,
+			)
+			if resp2.ok:
+				data = resp2.json()
+				arr = np.array(data["data"][0]["embedding"], dtype=np.float32)
+				norm = np.linalg.norm(arr)
+				if norm > 0:
+					arr /= norm
+				return tuple(float(x) for x in arr)
+		resp.raise_for_status()
+		raw = resp.json()
+		arr = np.array(raw[0], dtype=np.float32)
+		if arr.ndim == 2:   # token-level → mean pool
+			arr = arr.mean(axis=0)
+		norm = np.linalg.norm(arr)
+		if norm > 0:
+			arr /= norm
+		vec = arr
+	else:
+		vec = _embedder.encode(query, normalize_embeddings=True)
+	logger.info("Query embedding: %d-d in %.3fs", len(vec), time.perf_counter() - _t0)
 	return tuple(float(x) for x in vec)
 
 
@@ -56,7 +112,7 @@ def embed_query(query: str) -> list[float]:
 	try:
 		return list(_embed_query_cached(query))
 	except Exception as e:
-		logger.error("Failed to embed query locally: %s", e)
+		logger.error("Failed to embed query: %s", e)
 		raise
 
 @lru_cache(maxsize=256)
@@ -220,10 +276,80 @@ def hybrid_search(
 	min_score: float = 0.0,
 	highlight: bool = True,
 ) -> Tuple[list[dict], dict]:
-	return semantic_search(
-		query=query, top_k=top_k, document_name=document_name,
-		min_score=min_score, highlight=highlight,
-	)
+	if not ENABLE_HYBRID or _sparse_encoder is None:
+		logger.warning("hybrid_search called but ENABLE_HYBRID=0 or sparse model not loaded; falling back to semantic_search")
+		return semantic_search(query=query, top_k=top_k, document_name=document_name, min_score=min_score, highlight=highlight)
+	try:
+		client_qdrant = get_client()
+		with span("embed"):
+			query_embedding = embed_query(query)
+		with span("sparse_embed"):
+			sp = list(_sparse_encoder.embed([query]))[0]
+			sparse_vec = SparseVector(indices=sp.indices.tolist(), values=sp.values.tolist())
+		search_filter = None
+		if document_name:
+			search_filter = Filter(must=[FieldCondition(key="title", match=MatchValue(value=document_name))])
+		with span("qdrant_query"):
+			search_results = client_qdrant.query_points(
+				collection_name=COLLECTION_NAME,
+				prefetch=[
+					Prefetch(query=query_embedding, using="", limit=top_k * 2, filter=search_filter),
+					Prefetch(query=sparse_vec, using="sparse", limit=top_k * 2, filter=search_filter),
+				],
+				query=FusionQuery(fusion=Fusion.RRF),
+				limit=top_k,
+				with_payload=True,
+			)
+		results = []
+		for point in search_results.points:
+			payload = point.payload
+			text = payload.get("text", "")
+			title = payload.get("title", "Unknown")
+			chunk_page_offset_start = payload.get("page_offset_start", 0)
+			if highlight:
+				highlights_response = highlight_text(query, text)
+				highlighted_sentences = highlights_response.get("highlighted_sentences", [])
+				highlight_sentence_indexes = highlights_response.get("highlight_sentence_indexes", [])
+				highlight_offsets = highlights_response.get("highlight_offsets", [])
+			else:
+				highlighted_sentences = []
+				highlight_sentence_indexes = []
+				highlight_offsets = []
+			highlight_page_offset_starts = []
+			highlight_page_offset_ends = []
+			for chunk_start, chunk_end in highlight_offsets:
+				page_start = chunk_page_offset_start + chunk_start if chunk_page_offset_start else chunk_start
+				page_end = chunk_page_offset_start + chunk_end if chunk_page_offset_start else chunk_end
+				highlight_page_offset_starts.append(page_start)
+				highlight_page_offset_ends.append(page_end)
+			results.append({
+				"id": payload.get("doc_id"),
+				"score": point.score,
+				"title": title,
+				"text": text,
+				"page_start": payload.get("page_start"),
+				"page_end": payload.get("page_end"),
+				"char_start": payload.get("char_start"),
+				"char_end": payload.get("char_end"),
+				"page_offset_start": highlight_page_offset_starts if highlight_page_offset_starts else payload.get("page_offset_start"),
+				"page_offset_end": highlight_page_offset_ends if highlight_page_offset_ends else payload.get("page_offset_end"),
+				"pdf_path": payload.get("pdf_path"),
+				"source": ["embeddings", "sparse"],
+				"highlighted_sentences": highlighted_sentences,
+				"highlight_sentence_indexes": highlight_sentence_indexes,
+			})
+		metadata = {
+			"query": query,
+			"top_k": top_k,
+			"strategy": "hybrid_search",
+			"document_filter": document_name,
+			"min_score": min_score,
+			"results_count": len(results),
+		}
+		return results, metadata
+	except Exception as e:
+		logger.error("Hybrid search error: %s: %s", type(e).__name__, e)
+		raise
 
 def search(
 	query: str,

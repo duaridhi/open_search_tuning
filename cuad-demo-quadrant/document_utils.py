@@ -13,7 +13,8 @@ from qdrant_client.models import PointStruct
 logger = logging.getLogger(__name__)
 
 
-_SCROLL_PAGE_SIZE = 512
+_SCROLL_PAGE_SIZE = 512         # per-doc detail (filtered, small result set)
+_FULL_SCAN_PAGE_SIZE = 5000     # full-collection scan — minimises Cloud round-trips
 
 
 def get_unique_documents(client: QdrantClient, collection_name: str) -> List[Dict]:
@@ -38,8 +39,8 @@ def get_unique_documents(client: QdrantClient, collection_name: str) -> List[Dic
         while True:
             points, offset = client.scroll(
                 collection_name=collection_name,
-                limit=_SCROLL_PAGE_SIZE,
-                with_payload=["title", "pdf_path", "text"],
+                limit=_FULL_SCAN_PAGE_SIZE,
+                with_payload=["title", "pdf_path", "char_start", "char_end"],
                 with_vectors=False,
                 offset=offset,
             )
@@ -55,7 +56,7 @@ def get_unique_documents(client: QdrantClient, collection_name: str) -> List[Dic
                     "total_chars": 0,
                 })
                 entry["chunk_count"] += 1
-                entry["total_chars"] += len(payload.get("text", ""))
+                entry["total_chars"] += payload.get("char_end", 0) - payload.get("char_start", 0)
             if offset is None:
                 break
 

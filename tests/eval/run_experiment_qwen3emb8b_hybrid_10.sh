@@ -4,9 +4,6 @@
 # Experiment: Qwen/Qwen3-Embedding-8B (4096-d dense) + BM42 sparse,
 # hybrid search via Qdrant RRF fusion, first 10 contracts.
 #
-# Embeddings generated via HF Inference API (Scaleway provider — status=live).
-# No local model RAM needed.
-#
 # Compare against:
 #   run_experiment_bgelarge_hybrid_50.sh  (BAAI/bge-large-en-v1.5, 1024-d)
 #   run_experiment_minilm_hybrid_50.sh   (all-MiniLM-L6-v2, 384-d)
@@ -21,7 +18,7 @@ COLLECTION="cuad_qwen3emb8b_hybrid_10"
 EMBED_MODEL="Qwen/Qwen3-Embedding-8B"
 VECTOR_SIZE=4096
 SPARSE_MODEL="Qdrant/bm42-all-minilm-l6-v2-attentions"
-HF_PROVIDER="scaleway"
+HF_PROVIDER="hf-inference"
 DOC_OFFSET=0
 DOC_COUNT=10
 CHUNK_SIZE=500

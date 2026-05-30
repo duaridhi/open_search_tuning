@@ -128,7 +128,7 @@ def _hf_api_embed(texts: list[str]) -> list:
         timeout=60,
     )
     if resp.status_code == 400:
-        logger.debug("feature-extraction 400 body: %s", resp.text[:300])
+        logger.info("feature-extraction 400 body: %s", resp.text[:300])
         resp2 = requests.post(
             _HF_EMBED_URL_V1,
             headers=_HF_EMBED_HEADERS,
@@ -139,7 +139,7 @@ def _hf_api_embed(texts: list[str]) -> list:
             data = resp2.json()
             # OpenAI format: {"data": [{"embedding": [...], "index": 0}, ...]}
             return [item["embedding"] for item in sorted(data["data"], key=lambda x: x["index"])]
-        logger.debug("/v1/embeddings %d body: %s", resp2.status_code, resp2.text[:300])
+        logger.info("/v1/embeddings %d body: %s", resp2.status_code, resp2.text[:300])
     resp.raise_for_status()
     return resp.json()
 

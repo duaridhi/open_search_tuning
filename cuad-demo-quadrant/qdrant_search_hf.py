@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Tuple
@@ -18,72 +19,89 @@ import requests as _requests
 from qdrant_client.models import Filter, FieldCondition, MatchValue, Prefetch, FusionQuery, Fusion, SparseVector
 from qdrant_cluster_connect import get_qdrant_client, get_cluster_info
 
-from sentence_transformers import SentenceTransformer, CrossEncoder
+from huggingface_hub import InferenceClient
 from dotenv import load_dotenv
 
 from perf_trace import span
 
 logger = logging.getLogger(__name__)
 
-env_path = Path(__file__).parent / ".env"
+env_path = Path(__file__).resolve().parent.parent / ".env.dev"
 load_dotenv(env_path)
 # Configuration
-COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "cuad_contracts")
-EMBEDDING_MODEL_NAME = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-RERANKER_MODEL_ID = os.getenv("RERANKER_MODEL_ID", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+# ----------------------------------------------------------------------------
+# Production default: bge-large query embeddings + bge-reranker-v2-m3 result
+# reranking, BOTH served via the HuggingFace serverless Inference API
+# (huggingface_hub.InferenceClient). No model weights load locally and no GPU
+# code runs in this process; HF hosts the compute (ZeroGPU/serverless).
+#
+# EMBED_BACKEND / RERANK_BACKEND let the offline eval harness fall back to local
+# sentence-transformers models ("local"); the deployed default is "hf".
+# ----------------------------------------------------------------------------
+COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "cuad_bgelarge_hybrid")
+EMBEDDING_MODEL_NAME = os.getenv("EMBED_MODEL", "BAAI/bge-large-en-v1.5")
+RERANKER_MODEL_ID = os.getenv("RERANKER_MODEL_ID", "BAAI/bge-reranker-v2-m3")
 ENABLE_HYBRID = os.getenv("ENABLE_HYBRID", "0").lower() not in ("0", "false", "no")
 SPARSE_MODEL_NAME = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
-# Set ENABLE_RERANKER=0 to skip the CrossEncoder highlighting step (useful for ablation evals).
-ENABLE_RERANKER = os.getenv("ENABLE_RERANKER", "1").lower() not in ("0", "false", "no")
 
-# Result-list reranking (distinct from highlighting). When RERANK_RESULTS=1, the
-# search functions fetch a larger candidate pool (top_k * RERANK_POOL), score each
-# (query, chunk_text) pair with a CrossEncoder, and re-sort the *result list* by that
-# score before truncating to top_k. This is the precision lever: it reorders which
-# chunks rank first, unlike ENABLE_RERANKER which only highlights sentences within an
-# already-ranked chunk. Default model is small (CPU-friendly); override via RERANK_MODEL.
-RERANK_RESULTS = os.getenv("RERANK_RESULTS", "0").lower() not in ("0", "false", "no")
-RERANK_MODEL_ID = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+# Backend selection: "hf" (serverless Inference API, production default) | "local"
+EMBED_BACKEND = os.getenv("EMBED_BACKEND", "hf").lower()
+RERANK_BACKEND = os.getenv("RERANK_BACKEND", "hf").lower()
+
+# Result-list reranking (distinct from per-sentence highlighting). Fetch a larger
+# candidate pool from Qdrant (min(top_k * RERANK_POOL, RERANK_FETCH_LIMIT)), score
+# each (query, chunk) pair with the cross-encoder, re-sort, and truncate to top_k.
+# Operating point: top_k=20, pool=5, fetch_limit=60. Default ON in production.
+RERANK_RESULTS = os.getenv("RERANK_RESULTS", "1").lower() not in ("0", "false", "no")
+RERANK_MODEL_ID = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 RERANK_POOL = max(1, int(os.getenv("RERANK_POOL", "5")))
+# Pool cap. Each pool candidate is one HF reranker HTTPS call, so this is the main
+# latency knob: 60 trades a little recall (fewer deep candidates reranked) for
+# ~40% fewer rerank calls vs 100. Raise back to 100 via env if recall matters more.
+RERANK_FETCH_LIMIT = max(1, int(os.getenv("RERANK_FETCH_LIMIT", "60")))
+# Bounded concurrency for the HF per-pair rerank calls (huggingface_hub has no
+# native batch route; we parallelize instead of running calls strictly serially).
+RERANK_HF_WORKERS = max(1, int(os.getenv("RERANK_HF_WORKERS", "16")))
 
-# When HF_PROVIDER is set, embed queries via the HF Inference API instead of
-# loading the model locally — needed for large models (>2 GB) that won't fit in RAM.
-HF_PROVIDER = os.getenv("HF_PROVIDER", "")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
-EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "")   # "voyageai" to use VoyageAI API
-VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY", "")
 
-_embedder = None
+# Legacy HF_PROVIDER raw-router embedding path (kept for backward compat / eval).
+HF_PROVIDER = os.getenv("HF_PROVIDER", "")
 _hf_embed_url: str | None = None
-_hf_embed_headers: dict | None = None
 _hf_embed_url_v1: str | None = None
-_voyage_embed_url: str | None = None
-_voyage_embed_headers: dict | None = None
+_hf_embed_headers: dict | None = None
 
-if EMBED_PROVIDER == "voyageai":
-    _voyage_embed_url = "https://api.voyageai.com/v1/embeddings"
-    _voyage_embed_headers = {"Authorization": f"Bearer {VOYAGE_API_KEY}", "Content-Type": "application/json"}
-    logger.info("Query embedding via VoyageAI API: %s", EMBEDDING_MODEL_NAME)
+# Shared serverless Inference client (embeddings + reranking).
+_inference_client: InferenceClient | None = None
+_embedder = None   # local SentenceTransformer, only when EMBED_BACKEND="local"
+
+if EMBED_BACKEND == "hf":
+    _inference_client = InferenceClient(api_key=HF_TOKEN or None)
+    logger.info("Query embedding via HF Inference API: %s", EMBEDDING_MODEL_NAME)
 elif HF_PROVIDER:
     _hf_embed_url = f"https://router.huggingface.co/{HF_PROVIDER}/models/{EMBEDDING_MODEL_NAME}/pipeline/feature-extraction"
     _hf_embed_url_v1 = f"https://router.huggingface.co/{HF_PROVIDER}/v1/embeddings"
     _hf_embed_headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    logger.info("Query embedding via HF API (%s): %s", HF_PROVIDER, EMBEDDING_MODEL_NAME)
+    logger.info("Query embedding via HF router (%s): %s", HF_PROVIDER, EMBEDDING_MODEL_NAME)
 else:
+    from sentence_transformers import SentenceTransformer
     logger.info("Loading local embedding model: %s", EMBEDDING_MODEL_NAME)
     _embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
-if ENABLE_RERANKER:
+# Highlight + result-list reranker. In "hf" mode both use the serverless Inference
+# API (text-classification cross-encoder). In "local" mode a CrossEncoder loads.
+_reranker = None   # local CrossEncoder for highlights, only when RERANK_BACKEND="local"
+if RERANK_BACKEND == "hf":
+    if _inference_client is None:
+        _inference_client = InferenceClient(api_key=HF_TOKEN or None)
+    logger.info(
+        "Reranking via HF Inference API: %s (highlight) / %s (result-list)",
+        RERANKER_MODEL_ID, RERANK_MODEL_ID,
+    )
+else:
+    from sentence_transformers import CrossEncoder
     logger.info("Loading local CrossEncoder reranker: %s", RERANKER_MODEL_ID)
     _reranker = CrossEncoder(RERANKER_MODEL_ID, max_length=256)
-else:
-    logger.info("CrossEncoder reranker disabled (ENABLE_RERANKER=0) — highlights will be empty")
-    _reranker = None
-
-_result_reranker = None
-if RERANK_RESULTS:
-    logger.info("Loading result-reranker CrossEncoder: %s (candidate pool = top_k x %d)", RERANK_MODEL_ID, RERANK_POOL)
-    _result_reranker = CrossEncoder(RERANK_MODEL_ID, max_length=512)
 
 _sparse_encoder = None
 if ENABLE_HYBRID:
@@ -102,41 +120,53 @@ def init_qdrant():
 def get_client():
 	return get_qdrant_client()
 
-def _voyage_embed_query(query: str) -> np.ndarray:
-	"""Call VoyageAI embeddings with retry on 429 (3 req/min free-tier limit)."""
-	for attempt in range(5):
-		try:
-			resp = _requests.post(
-				_voyage_embed_url, headers=_voyage_embed_headers,
-				json={"input": [query], "model": EMBEDDING_MODEL_NAME, "input_type": "query"},
-				timeout=30,
-			)
-			resp.raise_for_status()
-			data = resp.json()
-			arr = np.array(data["data"][0]["embedding"], dtype=np.float32)
-			norm = np.linalg.norm(arr)
-			if norm > 0:
-				arr /= norm
-			return arr
-		except _requests.exceptions.HTTPError as exc:
-			status = exc.response.status_code if exc.response is not None else 0
-			if status == 429:
-				if attempt == 4:
-					raise
-				wait = 20 * (attempt + 1)
-				logger.warning("VoyageAI rate limited (429), attempt %d/5 — retrying in %ds", attempt + 1, wait)
-				time.sleep(wait)
-			else:
-				raise
-	raise RuntimeError("unreachable")
+
+def _ce_pair_input(query: str, passage: str) -> str:
+	"""Encode a (query, passage) pair as a single text for the HF text-classification
+	cross-encoder. bge-reranker-v2-m3 expects the pair joined with [SEP]."""
+	return f"{query} [SEP] {passage}"
+
+
+def _hf_ce_score(query: str, passage: str) -> float:
+	"""Score one (query, passage) pair via the HF Inference API cross-encoder.
+	Returns a sigmoid-normalized 0–1 relevance score. One HTTPS round-trip."""
+	out = _inference_client.text_classification(
+		_ce_pair_input(query, passage), model=RERANK_MODEL_ID,
+	)
+	# bge-reranker emits a single logit/score label; take the top element's score.
+	raw = float(out[0].score) if out else 0.0
+	return raw
+
+
+def _hf_ce_scores_parallel(query: str, passages: tuple) -> list[float]:
+	"""Score many (query, passage) pairs via the HF cross-encoder using a bounded
+	thread pool. huggingface_hub exposes no batch rerank route, so we fan out
+	per-pair calls with at most RERANK_HF_WORKERS concurrent HTTPS requests rather
+	than running them strictly sequentially."""
+	if not passages:
+		return []
+	workers = min(RERANK_HF_WORKERS, len(passages))
+	with ThreadPoolExecutor(max_workers=workers) as pool:
+		return list(pool.map(lambda p: _hf_ce_score(query, p), passages))
 
 
 @lru_cache(maxsize=1024)
 def _embed_query_cached(query: str) -> tuple[float, ...]:
 	_t0 = time.perf_counter()
-	if _voyage_embed_url:
-		vec = _voyage_embed_query(query)
-	elif _hf_embed_url:
+	if _inference_client is not None and EMBED_BACKEND == "hf":
+		arr = np.asarray(
+			_inference_client.feature_extraction(query, model=EMBEDDING_MODEL_NAME),
+			dtype=np.float32,
+		)
+		if arr.ndim == 2:   # token-level → mean pool
+			arr = arr.mean(axis=0)
+		norm = np.linalg.norm(arr)
+		if norm > 0:
+			arr /= norm
+		vec = arr
+		logger.info("Query embedding (HF API): %d-d in %.3fs", len(vec), time.perf_counter() - _t0)
+		return tuple(float(x) for x in vec)
+	if _hf_embed_url:
 		resp = _requests.post(
 			_hf_embed_url, headers=_hf_embed_headers,
 			json={"inputs": [query]}, timeout=30,
@@ -175,6 +205,31 @@ def embed_query(query: str) -> list[float]:
 		logger.error("Failed to embed query: %s", e)
 		raise
 
+
+def warmup_inference() -> None:
+	"""Fire one cheap embedding + one cheap reranker call to warm the HF serverless
+	endpoints, cutting first-query cold-start. Only meaningful on the HF backend;
+	no-op otherwise. Non-fatal: logs and returns on any failure so it can never
+	block startup. Intended to run in a background thread, gated by WARMUP_ON_START."""
+	if _inference_client is None:
+		logger.info("Warm-up skipped: not on HF Inference backend")
+		return
+	_t0 = time.perf_counter()
+	if EMBED_BACKEND == "hf":
+		try:
+			_inference_client.feature_extraction("warm up", model=EMBEDDING_MODEL_NAME)
+			logger.info("Warm-up: embed endpoint (%s) warmed", EMBEDDING_MODEL_NAME)
+		except Exception as e:
+			logger.warning("Warm-up embed call failed (non-fatal): %s", e)
+	if RERANK_BACKEND == "hf":
+		try:
+			_hf_ce_score("warm up", "warm up passage")
+			logger.info("Warm-up: reranker endpoint (%s) warmed", RERANK_MODEL_ID)
+		except Exception as e:
+			logger.warning("Warm-up reranker call failed (non-fatal): %s", e)
+	logger.info("Warm-up finished in %.2fs", time.perf_counter() - _t0)
+
+
 @lru_cache(maxsize=256)
 def highlight_text(query: str, document: str):
 	"""
@@ -191,23 +246,25 @@ def highlight_text(query: str, document: str):
 		if not sentences:
 			return {"highlighted_sentences": [], "highlight_sentence_indexes": [], "highlight_offsets": []}
 
-		# Score all sentences in a single batched local forward pass
+		# Score all sentences against the query with the cross-encoder.
+		# HF backend: bounded-parallel per-pair Inference API calls.
+		# local backend: single batched forward pass.
 		_reranker_t0 = time.perf_counter()
-		if _reranker is not None:
-			try:
-				with span("rerank"):
+		try:
+			with span("rerank"):
+				if RERANK_BACKEND == "hf":
+					raw_scores = _hf_ce_scores_parallel(query, tuple(sentences))
+				else:
 					raw_scores = _reranker.predict([(query, s) for s in sentences], batch_size=32)
-				sentence_scores = (1.0 / (1.0 + np.exp(-np.asarray(raw_scores, dtype=np.float32)))).tolist()
-			except Exception as e:
-				logger.warning("Local CrossEncoder failed: %s", e)
-				sentence_scores = [0.0] * len(sentences)
-			logger.info(
-				"Local CrossEncoder scored %d sentences in %.3fs",
-				len(sentences),
-				time.perf_counter() - _reranker_t0,
-			)
-		else:
+			sentence_scores = (1.0 / (1.0 + np.exp(-np.asarray(raw_scores, dtype=np.float32)))).tolist()
+		except Exception as e:
+			logger.warning("Highlight reranker (%s) failed: %s", RERANK_BACKEND, e)
 			sentence_scores = [0.0] * len(sentences)
+		logger.info(
+			"Highlight reranker (%s) scored %d sentences in %.3fs",
+			RERANK_BACKEND, len(sentences),
+			time.perf_counter() - _reranker_t0,
+		)
 		
 		with span("highlight_assemble"):
 			# Find top-scoring sentences (above threshold)
@@ -254,78 +311,43 @@ def highlight_text(query: str, document: str):
 		logger.warning("Failed to highlight using reranker: %s", e)
 		return {"highlighted_sentences": [], "highlight_sentence_indexes": [], "highlight_offsets": []}
 
-def _build_candidate(payload: dict, score: float, source: list[str]) -> dict:
-	"""Assemble a result dict from a Qdrant point payload (highlights added later)."""
-	return {
-		"id": payload.get("doc_id"),
-		"score": score,
-		"title": payload.get("title", "Unknown"),
-		"text": payload.get("text", ""),
-		"page_start": payload.get("page_start"),
-		"page_end": payload.get("page_end"),
-		"char_start": payload.get("char_start"),
-		"char_end": payload.get("char_end"),
-		"page_offset_start": payload.get("page_offset_start"),
-		"page_offset_end": payload.get("page_offset_end"),
-		"pdf_path": payload.get("pdf_path"),
-		"source": source,
-		"highlighted_sentences": [],
-		"highlight_sentence_indexes": [],
-		"_raw_page_offset_start": payload.get("page_offset_start", 0),
-	}
+
+def _result_rerank_enabled() -> bool:
+	return RERANK_RESULTS and (RERANK_BACKEND == "hf" or _reranker is not None)
 
 
-def _apply_highlight(query: str, cand: dict) -> None:
-	"""Compute sentence highlights for a finalized candidate and fold the highlight
-	offsets into page_offset_start/page_offset_end (mirrors the original inline logic)."""
-	chunk_page_offset_start = cand.get("_raw_page_offset_start", 0)
-	hl = highlight_text(query, cand["text"])
-	offsets = hl.get("highlight_offsets", [])
-	starts, ends = [], []
-	for chunk_start, chunk_end in offsets:
-		starts.append(chunk_page_offset_start + chunk_start if chunk_page_offset_start else chunk_start)
-		ends.append(chunk_page_offset_start + chunk_end if chunk_page_offset_start else chunk_end)
-	cand["highlighted_sentences"] = hl.get("highlighted_sentences", [])
-	cand["highlight_sentence_indexes"] = hl.get("highlight_sentence_indexes", [])
-	if starts:
-		cand["page_offset_start"] = starts
-		cand["page_offset_end"] = ends
+def _rerank_fetch_limit(top_k: int) -> int:
+	"""How many candidates to pull from Qdrant before reranking down to top_k."""
+	if not _result_rerank_enabled():
+		return top_k
+	return min(top_k * RERANK_POOL, RERANK_FETCH_LIMIT)
 
 
-@lru_cache(maxsize=512)
-def _rerank_scores_cached(query: str, texts: tuple) -> tuple:
-	"""Score (query, chunk_text) pairs with the result-reranker CrossEncoder.
-	Cached so the eval's repeated latency probes for one query reuse one forward pass.
-
-	Reshape to (n_pairs, -1) and take the first logit so we return exactly one score
-	per candidate even if RERANK_MODEL is a multi-output model — a flat ravel() would
-	yield n*k scores and silently misalign with the candidate list under zip()."""
-	raw = _result_reranker.predict([(query, t) for t in texts], batch_size=32)
-	arr = np.asarray(raw, dtype=np.float32).reshape(len(texts), -1)
-	return tuple(float(x) for x in arr[:, 0])
-
-
-def _rerank_candidates(query: str, candidates: list[dict], top_k: int) -> list[dict]:
-	"""Re-sort the candidate pool by CrossEncoder (query, chunk) score, return top_k.
-	Keeps the original vector/RRF score as `vector_score`; `score` becomes the
-	sigmoid-normalized rerank score so it stays in a comparable 0–1 range for the UI."""
-	if not _result_reranker or not candidates:
-		return candidates[:top_k]
-	texts = tuple(c["text"] for c in candidates)
+def _rerank_points(query: str, points: list, top_k: int) -> list:
+	"""Re-sort Qdrant result points by cross-encoder (query, chunk_text) score and
+	truncate to top_k. HF backend uses bounded-parallel Inference API calls; local
+	backend uses a single batched CrossEncoder forward pass. On failure, keeps the
+	original retrieval order (truncated to top_k)."""
+	if not _result_rerank_enabled() or not points:
+		return points[:top_k]
+	texts = tuple((p.payload or {}).get("text", "") for p in points)
 	try:
 		_t0 = time.perf_counter()
 		with span("result_rerank"):
-			scores = _rerank_scores_cached(query, texts)
-		logger.info("Result reranker scored %d candidates in %.3fs", len(texts), time.perf_counter() - _t0)
+			if RERANK_BACKEND == "hf":
+				scores = _hf_ce_scores_parallel(query, texts)
+			else:
+				scores = _reranker.predict([(query, t) for t in texts], batch_size=32)
+		logger.info(
+			"Result reranker (%s) scored %d candidates in %.3fs",
+			RERANK_BACKEND, len(texts), time.perf_counter() - _t0,
+		)
 	except Exception as e:
 		logger.warning("Result reranker failed: %s — keeping retrieval order", e)
-		return candidates[:top_k]
-	for cand, raw in zip(candidates, scores):
-		cand["vector_score"] = cand.get("score")
-		cand["rerank_score"] = raw
-		cand["score"] = float(1.0 / (1.0 + np.exp(-raw)))
-	candidates.sort(key=lambda c: c["rerank_score"], reverse=True)
-	return candidates[:top_k]
+		return points[:top_k]
+	scores = np.asarray(scores, dtype=np.float32).ravel()
+	order = np.argsort(-scores)
+	return [points[i] for i in order[:top_k]]
 
 
 def semantic_search(
@@ -344,30 +366,57 @@ def semantic_search(
 			search_filter = Filter(
 				must=[FieldCondition(key="title", match=MatchValue(value=document_name))]
 			)
-		rerank_on = RERANK_RESULTS and _result_reranker is not None
-		fetch_limit = top_k * RERANK_POOL if rerank_on else top_k
 		with span("qdrant_query"):
 			search_results = client_qdrant.query_points(
 				collection_name=COLLECTION_NAME,
 				query=query_embedding,
 				query_filter=search_filter,
-				limit=fetch_limit,
+				limit=_rerank_fetch_limit(top_k),
 				with_payload=True,
 			)
-		candidates = [
-			_build_candidate(point.payload, point.score, ["embeddings"])
-			for point in search_results.points
-			if point.score >= min_score
-		]
-		if rerank_on:
-			candidates = _rerank_candidates(query, candidates, top_k)
-		else:
-			candidates = candidates[:top_k]
-		for cand in candidates:
-			if highlight:
-				_apply_highlight(query, cand)
-			cand.pop("_raw_page_offset_start", None)
-		results = candidates
+		rerank_on = _result_rerank_enabled()
+		points = _rerank_points(query, search_results.points, top_k) if rerank_on else search_results.points[:top_k]
+		results = []
+		for point in points:
+			if point.score >= min_score:
+				payload = point.payload
+				text = payload.get("text", "")
+				title = payload.get("title", "Unknown")
+				chunk_page_offset_start = payload.get("page_offset_start", 0)
+				if highlight:
+					highlights_response = highlight_text(query, text)
+					highlighted_sentences = highlights_response.get("highlighted_sentences", [])
+					highlight_sentence_indexes = highlights_response.get("highlight_sentence_indexes", [])
+					highlight_offsets = highlights_response.get("highlight_offsets", [])
+				else:
+					highlighted_sentences = []
+					highlight_sentence_indexes = []
+					highlight_offsets = []
+				highlight_page_offset_starts = []
+				highlight_page_offset_ends = []
+				for chunk_start, chunk_end in highlight_offsets:
+					page_start = chunk_page_offset_start + chunk_start if chunk_page_offset_start else chunk_start
+					page_end = chunk_page_offset_start + chunk_end if chunk_page_offset_start else chunk_end
+					highlight_page_offset_starts.append(page_start)
+					highlight_page_offset_ends.append(page_end)
+				results.append(
+					{
+						"id": payload.get("doc_id"),
+						"score": point.score,
+						"title": title,
+						"text": text,
+						"page_start": payload.get("page_start"),
+						"page_end": payload.get("page_end"),
+						"char_start": payload.get("char_start"),
+						"char_end": payload.get("char_end"),
+						"page_offset_start": highlight_page_offset_starts if highlight_page_offset_starts else payload.get("page_offset_start"),
+						"page_offset_end": highlight_page_offset_ends if highlight_page_offset_ends else payload.get("page_offset_end"),
+						"pdf_path": payload.get("pdf_path"),
+						"source": ["embeddings"],
+						"highlighted_sentences": highlighted_sentences,
+						"highlight_sentence_indexes": highlight_sentence_indexes,
+					}
+				)
 		metadata = {
 			"query": query,
 			"top_k": top_k,
@@ -402,8 +451,7 @@ def hybrid_search(
 		search_filter = None
 		if document_name:
 			search_filter = Filter(must=[FieldCondition(key="title", match=MatchValue(value=document_name))])
-		rerank_on = RERANK_RESULTS and _result_reranker is not None
-		fetch_limit = top_k * RERANK_POOL if rerank_on else top_k
+		fetch_limit = _rerank_fetch_limit(top_k)
 		with span("qdrant_query"):
 			search_results = client_qdrant.query_points(
 				collection_name=COLLECTION_NAME,
@@ -415,19 +463,46 @@ def hybrid_search(
 				limit=fetch_limit,
 				with_payload=True,
 			)
-		candidates = [
-			_build_candidate(point.payload, point.score, ["embeddings", "sparse"])
-			for point in search_results.points
-		]
-		if rerank_on:
-			candidates = _rerank_candidates(query, candidates, top_k)
-		else:
-			candidates = candidates[:top_k]
-		for cand in candidates:
+		rerank_on = _result_rerank_enabled()
+		points = _rerank_points(query, search_results.points, top_k) if rerank_on else search_results.points[:top_k]
+		results = []
+		for point in points:
+			payload = point.payload
+			text = payload.get("text", "")
+			title = payload.get("title", "Unknown")
+			chunk_page_offset_start = payload.get("page_offset_start", 0)
 			if highlight:
-				_apply_highlight(query, cand)
-			cand.pop("_raw_page_offset_start", None)
-		results = candidates
+				highlights_response = highlight_text(query, text)
+				highlighted_sentences = highlights_response.get("highlighted_sentences", [])
+				highlight_sentence_indexes = highlights_response.get("highlight_sentence_indexes", [])
+				highlight_offsets = highlights_response.get("highlight_offsets", [])
+			else:
+				highlighted_sentences = []
+				highlight_sentence_indexes = []
+				highlight_offsets = []
+			highlight_page_offset_starts = []
+			highlight_page_offset_ends = []
+			for chunk_start, chunk_end in highlight_offsets:
+				page_start = chunk_page_offset_start + chunk_start if chunk_page_offset_start else chunk_start
+				page_end = chunk_page_offset_start + chunk_end if chunk_page_offset_start else chunk_end
+				highlight_page_offset_starts.append(page_start)
+				highlight_page_offset_ends.append(page_end)
+			results.append({
+				"id": payload.get("doc_id"),
+				"score": point.score,
+				"title": title,
+				"text": text,
+				"page_start": payload.get("page_start"),
+				"page_end": payload.get("page_end"),
+				"char_start": payload.get("char_start"),
+				"char_end": payload.get("char_end"),
+				"page_offset_start": highlight_page_offset_starts if highlight_page_offset_starts else payload.get("page_offset_start"),
+				"page_offset_end": highlight_page_offset_ends if highlight_page_offset_ends else payload.get("page_offset_end"),
+				"pdf_path": payload.get("pdf_path"),
+				"source": ["embeddings", "sparse"],
+				"highlighted_sentences": highlighted_sentences,
+				"highlight_sentence_indexes": highlight_sentence_indexes,
+			})
 		metadata = {
 			"query": query,
 			"top_k": top_k,
@@ -512,21 +587,3 @@ def get_collection_stats() -> dict:
 			"points_count": None,
 			"vector_size": None,
 		}
-
-
-def get_search_config() -> dict:
-	"""Report the search-relevant configuration this process is actually running with.
-	Lets eval clients record the *server's* true config instead of inferring it from
-	their own environment (which can disagree with the server and corrupt run provenance)."""
-	return {
-		"collection": COLLECTION_NAME,
-		"embed_model": EMBEDDING_MODEL_NAME,
-		"embed_provider": EMBED_PROVIDER,
-		"hf_provider": HF_PROVIDER,
-		"enable_hybrid": ENABLE_HYBRID,
-		"enable_reranker": ENABLE_RERANKER,
-		"rerank_results": RERANK_RESULTS,
-		"rerank_model": RERANK_MODEL_ID if RERANK_RESULTS else "",
-		"rerank_pool": RERANK_POOL if RERANK_RESULTS else None,
-		"sparse_model": SPARSE_MODEL_NAME if ENABLE_HYBRID else "",
-	}

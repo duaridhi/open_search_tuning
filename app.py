@@ -32,7 +32,7 @@ from qdrant_search_hf import (
     init_qdrant,
     search,
     get_collection_stats,
-    get_search_config,
+    warmup_inference,
 )
 from document_utils import get_unique_documents, get_document_info
 from chat_hf import chat
@@ -63,6 +63,18 @@ COLLECTION_STATS_TIMEOUT = int(os.getenv("COLLECTION_STATS_TIMEOUT", "10"))
 SEARCH_TIMEOUT = int(os.getenv("SEARCH_TIMEOUT", "60"))
 DOCS_LIST_TIMEOUT = int(os.getenv("DOCS_LIST_TIMEOUT", "20"))
 DOCS_DETAIL_TIMEOUT = int(os.getenv("DOCS_DETAIL_TIMEOUT", "15"))
+
+# Default for /search ?highlight= . Per-sentence highlighting fires ~20 HF reranker
+# calls per result, the dominant latency cost. The result-list reranker already
+# orders results, so highlights are not needed for ranking — default OFF for latency.
+# Flip back on with SEARCH_HIGHLIGHT=true (or per-request ?highlight=true).
+SEARCH_HIGHLIGHT_DEFAULT = os.getenv("SEARCH_HIGHLIGHT", "false").lower() not in ("0", "false", "no")
+
+# When true, fire one cheap embed + one cheap reranker call on startup (in a
+# background task) to warm the HF serverless endpoints and cut first-query
+# cold-start. Non-blocking and non-fatal. Default off. HF Pro raises rate limits,
+# so warm-up plus the 16-worker parallel rerank won't throttle.
+WARMUP_ON_START = os.getenv("WARMUP_ON_START", "false").lower() not in ("0", "false", "no")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -204,7 +216,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Could not fetch collection stats: {e}", exc_info=True)
 
+    # Optional serverless warm-up — non-blocking background task, never delays
+    # startup or health checks. Gated by WARMUP_ON_START; failures are logged
+    # inside warmup_inference() and swallowed here.
+    if WARMUP_ON_START:
+        async def _run_warmup():
+            try:
+                await asyncio.to_thread(warmup_inference)
+            except Exception as e:
+                logger.warning(f"Warm-up task failed (non-fatal): {e}")
+        warmup_task = asyncio.create_task(_run_warmup())
+        logger.info("Serverless warm-up dispatched in background (WARMUP_ON_START=1)")
+    else:
+        warmup_task = None
+
     yield  # App runs here
+
+    if warmup_task is not None and not warmup_task.done():
+        warmup_task.cancel()
 
     logger.info("Shutting down CUAD Qdrant API...")
 
@@ -277,20 +306,12 @@ async def health_check():
         )
 
 
-@app.get("/config", tags=["System"])
-async def config():
-    """Report the search configuration this server process is actually running with
-    (embedder, hybrid/reranker toggles, rerank model/pool). Used by the eval harness
-    to record the server's true config rather than inferring it from the client env."""
-    return get_search_config()
-
-
 @app.get("/search", response_model=SearchResponse, tags=["Search"])
 async def search_contracts(
     q: str = Query(..., description="Search query", min_length=1),
     top_k: int = Query(
-        10,
-        description="Number of results",
+        int(os.getenv("SEARCH_TOP_K", "20")),
+        description="Number of results (default from SEARCH_TOP_K; operating point 20)",
         ge=1,
         le=100,
     ),
@@ -303,8 +324,8 @@ async def search_contracts(
         description="Search strategy: semantic_search or hybrid_search",
     ),
     highlight: bool = Query(
-        True,
-        description="If false, skip per-sentence reranking and return chunks without highlights. Faster.",
+        SEARCH_HIGHLIGHT_DEFAULT,
+        description="If false, skip per-sentence reranking and return chunks without highlights. Faster. Default from SEARCH_HIGHLIGHT (off).",
     ),
     response: Response = None,
 ) -> SearchResponse:

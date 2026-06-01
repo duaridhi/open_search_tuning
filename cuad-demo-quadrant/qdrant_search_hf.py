@@ -16,7 +16,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import requests as _requests
-from qdrant_client.models import Filter, FieldCondition, MatchValue, Prefetch, FusionQuery, Fusion, SparseVector
+from qdrant_client.models import Filter, FieldCondition, MatchValue, Prefetch, RrfQuery, Rrf, SparseVector
 from qdrant_cluster_connect import get_qdrant_client, get_cluster_info
 
 from huggingface_hub import InferenceClient
@@ -41,8 +41,43 @@ load_dotenv(env_path)
 COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "cuad_bgelarge_hybrid")
 EMBEDDING_MODEL_NAME = os.getenv("EMBED_MODEL", "BAAI/bge-large-en-v1.5")
 RERANKER_MODEL_ID = os.getenv("RERANKER_MODEL_ID", "BAAI/bge-reranker-v2-m3")
-ENABLE_HYBRID = os.getenv("ENABLE_HYBRID", "0").lower() not in ("0", "false", "no")
+# Canonical search-strategy vocabulary, shared by the request-time `strategy` arg
+# AND the startup LOAD_MODEL_STRATEGY env var so the two read identically.
+STRATEGY_SEMANTIC = "semantic_search"   # dense only
+STRATEGY_SPARSE = "sparse_search"       # BM42 sparse only
+STRATEGY_HYBRID = "hybrid_search"       # weighted-RRF fusion of both
+SEARCH_STRATEGIES = (STRATEGY_SEMANTIC, STRATEGY_SPARSE, STRATEGY_HYBRID)
+
+# LOAD_MODEL_STRATEGY selects which query-time embedding models load at startup,
+# using the same vocabulary as the request strategy:
+#   semantic_search → dense embedder only
+#   sparse_search   → BM42 sparse encoder only
+#   hybrid_search   → both (required by hybrid_search requests)
+# Model loading happens once at import, so this is a deploy-time capability switch.
+# The per-request `strategy` then routes to a search needing those models and fails
+# loudly if they were not loaded, rather than silently degrading. Back-compat:
+# legacy ENABLE_HYBRID=1 maps to hybrid_search when LOAD_MODEL_STRATEGY is unset.
+_legacy_hybrid = os.getenv("ENABLE_HYBRID", "").lower() in ("1", "true", "yes")
+LOAD_MODEL_STRATEGY = os.getenv(
+    "LOAD_MODEL_STRATEGY", STRATEGY_HYBRID if _legacy_hybrid else STRATEGY_SEMANTIC
+).lower()
+if LOAD_MODEL_STRATEGY not in SEARCH_STRATEGIES:
+    raise ValueError(
+        f"LOAD_MODEL_STRATEGY must be one of {SEARCH_STRATEGIES}; got {LOAD_MODEL_STRATEGY!r}"
+    )
+LOAD_DENSE = LOAD_MODEL_STRATEGY in (STRATEGY_SEMANTIC, STRATEGY_HYBRID)
+LOAD_SPARSE = LOAD_MODEL_STRATEGY in (STRATEGY_SPARSE, STRATEGY_HYBRID)
 SPARSE_MODEL_NAME = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
+
+# Weighted RRF fusion for hybrid search. Qdrant fuses the dense + sparse prefetch
+# branches with reciprocal-rank fusion; these weights bias the blend. Tuned on
+# cuad_bgelarge_hybrid_50 (see tests/eval/RRF_WEIGHT_TUNING.md): dense:sparse =
+# 0.7:0.3 beats the balanced 0.5:0.5 default on both recall and ranking. NOTE: that
+# sweep ran with the result reranker OFF, so the win is established for the fused
+# retrieval order (the rerank pool feed), not yet re-confirmed reranker-on end to
+# end. Only the ratio matters. `... or "0.7"` keeps a blank env var from crashing.
+RRF_DENSE_WEIGHT = float(os.getenv("RRF_DENSE_WEIGHT") or "0.7")
+RRF_SPARSE_WEIGHT = float(os.getenv("RRF_SPARSE_WEIGHT") or "0.3")
 
 # Backend selection: "hf" (serverless Inference API, production default) | "local"
 EMBED_BACKEND = os.getenv("EMBED_BACKEND", "hf").lower()
@@ -74,19 +109,24 @@ _hf_embed_headers: dict | None = None
 # Shared serverless Inference client (embeddings + reranking).
 _inference_client: InferenceClient | None = None
 _embedder = None   # local SentenceTransformer, only when EMBED_BACKEND="local"
+_dense_available = False   # True once a dense query-embedding path is initialized
 
-if EMBED_BACKEND == "hf":
-    _inference_client = InferenceClient(api_key=HF_TOKEN or None)
-    logger.info("Query embedding via HF Inference API: %s", EMBEDDING_MODEL_NAME)
-elif HF_PROVIDER:
-    _hf_embed_url = f"https://router.huggingface.co/{HF_PROVIDER}/models/{EMBEDDING_MODEL_NAME}/pipeline/feature-extraction"
-    _hf_embed_url_v1 = f"https://router.huggingface.co/{HF_PROVIDER}/v1/embeddings"
-    _hf_embed_headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    logger.info("Query embedding via HF router (%s): %s", HF_PROVIDER, EMBEDDING_MODEL_NAME)
+if LOAD_DENSE:
+    if EMBED_BACKEND == "hf":
+        _inference_client = InferenceClient(api_key=HF_TOKEN or None)
+        logger.info("Query embedding via HF Inference API: %s", EMBEDDING_MODEL_NAME)
+    elif HF_PROVIDER:
+        _hf_embed_url = f"https://router.huggingface.co/{HF_PROVIDER}/models/{EMBEDDING_MODEL_NAME}/pipeline/feature-extraction"
+        _hf_embed_url_v1 = f"https://router.huggingface.co/{HF_PROVIDER}/v1/embeddings"
+        _hf_embed_headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        logger.info("Query embedding via HF router (%s): %s", HF_PROVIDER, EMBEDDING_MODEL_NAME)
+    else:
+        from sentence_transformers import SentenceTransformer
+        logger.info("Loading local embedding model: %s", EMBEDDING_MODEL_NAME)
+        _embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    _dense_available = True
 else:
-    from sentence_transformers import SentenceTransformer
-    logger.info("Loading local embedding model: %s", EMBEDDING_MODEL_NAME)
-    _embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    logger.info("LOAD_MODEL_STRATEGY=%s: dense query embedder not loaded", LOAD_MODEL_STRATEGY)
 
 # Highlight + result-list reranker. In "hf" mode both use the serverless Inference
 # API (text-classification cross-encoder). In "local" mode a CrossEncoder loads.
@@ -104,15 +144,15 @@ else:
     _reranker = CrossEncoder(RERANKER_MODEL_ID, max_length=256)
 
 _sparse_encoder = None
-if ENABLE_HYBRID:
+if LOAD_SPARSE:
     try:
         from fastembed import SparseTextEmbedding
         logger.info("Loading sparse embedding model: %s", SPARSE_MODEL_NAME)
         _sparse_encoder = SparseTextEmbedding(model_name=SPARSE_MODEL_NAME)
         logger.info("Sparse model loaded.")
     except ImportError:
-        logger.warning("fastembed not installed; ENABLE_HYBRID disabled. pip install fastembed")
-        ENABLE_HYBRID = False
+        logger.warning("fastembed not installed; sparse model unavailable. pip install fastembed")
+_sparse_available = _sparse_encoder is not None
 
 def init_qdrant():
 	return get_qdrant_client()
@@ -199,6 +239,11 @@ def _embed_query_cached(query: str) -> tuple[float, ...]:
 
 
 def embed_query(query: str) -> list[float]:
+	if not _dense_available:
+		raise RuntimeError(
+			f"Dense embedding model not loaded (LOAD_MODEL_STRATEGY={LOAD_MODEL_STRATEGY}); "
+			"set LOAD_MODEL_STRATEGY=semantic_search or hybrid_search to use semantic/hybrid search."
+		)
 	try:
 		return list(_embed_query_cached(query))
 	except Exception as e:
@@ -350,6 +395,76 @@ def _rerank_points(query: str, points: list, top_k: int) -> list:
 	return [points[i] for i in order[:top_k]]
 
 
+def _assemble_results(
+	query: str,
+	raw_points: list,
+	top_k: int,
+	min_score: float,
+	highlight: bool,
+	source: list[str],
+	strategy: str,
+	document_name: Optional[str],
+) -> Tuple[list[dict], dict]:
+	"""Shared post-retrieval stage for all three search strategies: optional
+	cross-encoder result reranking, min_score filtering, per-chunk highlight +
+	page-offset mapping, result-dict construction, and metadata. `source` labels
+	which retrieval signals produced the chunk; `strategy` is echoed into metadata."""
+	rerank_on = _result_rerank_enabled()
+	points = _rerank_points(query, raw_points, top_k) if rerank_on else raw_points[:top_k]
+	results = []
+	for point in points:
+		if point.score < min_score:
+			continue
+		payload = point.payload or {}
+		text = payload.get("text", "")
+		title = payload.get("title", "Unknown")
+		chunk_page_offset_start = payload.get("page_offset_start", 0)
+		if highlight:
+			highlights_response = highlight_text(query, text)
+			highlighted_sentences = highlights_response.get("highlighted_sentences", [])
+			highlight_sentence_indexes = highlights_response.get("highlight_sentence_indexes", [])
+			highlight_offsets = highlights_response.get("highlight_offsets", [])
+		else:
+			highlighted_sentences = []
+			highlight_sentence_indexes = []
+			highlight_offsets = []
+		highlight_page_offset_starts = []
+		highlight_page_offset_ends = []
+		for chunk_start, chunk_end in highlight_offsets:
+			page_start = chunk_page_offset_start + chunk_start if chunk_page_offset_start else chunk_start
+			page_end = chunk_page_offset_start + chunk_end if chunk_page_offset_start else chunk_end
+			highlight_page_offset_starts.append(page_start)
+			highlight_page_offset_ends.append(page_end)
+		results.append(
+			{
+				"id": payload.get("doc_id"),
+				"score": point.score,
+				"title": title,
+				"text": text,
+				"page_start": payload.get("page_start"),
+				"page_end": payload.get("page_end"),
+				"char_start": payload.get("char_start"),
+				"char_end": payload.get("char_end"),
+				"page_offset_start": highlight_page_offset_starts if highlight_page_offset_starts else payload.get("page_offset_start"),
+				"page_offset_end": highlight_page_offset_ends if highlight_page_offset_ends else payload.get("page_offset_end"),
+				"pdf_path": payload.get("pdf_path"),
+				"source": source,
+				"highlighted_sentences": highlighted_sentences,
+				"highlight_sentence_indexes": highlight_sentence_indexes,
+			}
+		)
+	metadata = {
+		"query": query,
+		"top_k": top_k,
+		"strategy": strategy,
+		"document_filter": document_name,
+		"min_score": min_score,
+		"reranked": rerank_on,
+		"results_count": len(results),
+	}
+	return results, metadata
+
+
 def semantic_search(
 	query: str,
 	top_k: int = 10,
@@ -374,59 +489,10 @@ def semantic_search(
 				limit=_rerank_fetch_limit(top_k),
 				with_payload=True,
 			)
-		rerank_on = _result_rerank_enabled()
-		points = _rerank_points(query, search_results.points, top_k) if rerank_on else search_results.points[:top_k]
-		results = []
-		for point in points:
-			if point.score >= min_score:
-				payload = point.payload
-				text = payload.get("text", "")
-				title = payload.get("title", "Unknown")
-				chunk_page_offset_start = payload.get("page_offset_start", 0)
-				if highlight:
-					highlights_response = highlight_text(query, text)
-					highlighted_sentences = highlights_response.get("highlighted_sentences", [])
-					highlight_sentence_indexes = highlights_response.get("highlight_sentence_indexes", [])
-					highlight_offsets = highlights_response.get("highlight_offsets", [])
-				else:
-					highlighted_sentences = []
-					highlight_sentence_indexes = []
-					highlight_offsets = []
-				highlight_page_offset_starts = []
-				highlight_page_offset_ends = []
-				for chunk_start, chunk_end in highlight_offsets:
-					page_start = chunk_page_offset_start + chunk_start if chunk_page_offset_start else chunk_start
-					page_end = chunk_page_offset_start + chunk_end if chunk_page_offset_start else chunk_end
-					highlight_page_offset_starts.append(page_start)
-					highlight_page_offset_ends.append(page_end)
-				results.append(
-					{
-						"id": payload.get("doc_id"),
-						"score": point.score,
-						"title": title,
-						"text": text,
-						"page_start": payload.get("page_start"),
-						"page_end": payload.get("page_end"),
-						"char_start": payload.get("char_start"),
-						"char_end": payload.get("char_end"),
-						"page_offset_start": highlight_page_offset_starts if highlight_page_offset_starts else payload.get("page_offset_start"),
-						"page_offset_end": highlight_page_offset_ends if highlight_page_offset_ends else payload.get("page_offset_end"),
-						"pdf_path": payload.get("pdf_path"),
-						"source": ["embeddings"],
-						"highlighted_sentences": highlighted_sentences,
-						"highlight_sentence_indexes": highlight_sentence_indexes,
-					}
-				)
-		metadata = {
-			"query": query,
-			"top_k": top_k,
-			"strategy": "semantic_search",
-			"document_filter": document_name,
-			"min_score": min_score,
-			"reranked": rerank_on,
-			"results_count": len(results),
-		}
-		return results, metadata
+		return _assemble_results(
+			query, search_results.points, top_k, min_score, highlight,
+			source=["embeddings"], strategy=STRATEGY_SEMANTIC, document_name=document_name,
+		)
 	except Exception as e:
 		logger.error("Search error: %s: %s", type(e).__name__, e)
 		raise
@@ -438,9 +504,18 @@ def hybrid_search(
 	min_score: float = 0.0,
 	highlight: bool = True,
 ) -> Tuple[list[dict], dict]:
-	if not ENABLE_HYBRID or _sparse_encoder is None:
-		logger.warning("hybrid_search called but ENABLE_HYBRID=0 or sparse model not loaded; falling back to semantic_search")
-		return semantic_search(query=query, top_k=top_k, document_name=document_name, min_score=min_score, highlight=highlight)
+	# Hybrid needs both query embedders loaded. Fail loudly rather than silently
+	# degrading to semantic — the caller asked for HYBRID explicitly.
+	if not _sparse_available:
+		raise RuntimeError(
+			f"hybrid_search requires the sparse model, but LOAD_MODEL_STRATEGY={LOAD_MODEL_STRATEGY} "
+			"did not load it. Set LOAD_MODEL_STRATEGY=hybrid_search."
+		)
+	if not _dense_available:
+		raise RuntimeError(
+			f"hybrid_search requires the dense model, but LOAD_MODEL_STRATEGY={LOAD_MODEL_STRATEGY} "
+			"did not load it. Set LOAD_MODEL_STRATEGY=hybrid_search."
+		)
 	try:
 		client_qdrant = get_client()
 		with span("embed"):
@@ -459,83 +534,86 @@ def hybrid_search(
 					Prefetch(query=query_embedding, using="", limit=fetch_limit * 2, filter=search_filter),
 					Prefetch(query=sparse_vec, using="sparse", limit=fetch_limit * 2, filter=search_filter),
 				],
-				query=FusionQuery(fusion=Fusion.RRF),
+				query=RrfQuery(rrf=Rrf(weights=[RRF_DENSE_WEIGHT, RRF_SPARSE_WEIGHT])),
 				limit=fetch_limit,
 				with_payload=True,
 			)
-		rerank_on = _result_rerank_enabled()
-		points = _rerank_points(query, search_results.points, top_k) if rerank_on else search_results.points[:top_k]
-		results = []
-		for point in points:
-			payload = point.payload
-			text = payload.get("text", "")
-			title = payload.get("title", "Unknown")
-			chunk_page_offset_start = payload.get("page_offset_start", 0)
-			if highlight:
-				highlights_response = highlight_text(query, text)
-				highlighted_sentences = highlights_response.get("highlighted_sentences", [])
-				highlight_sentence_indexes = highlights_response.get("highlight_sentence_indexes", [])
-				highlight_offsets = highlights_response.get("highlight_offsets", [])
-			else:
-				highlighted_sentences = []
-				highlight_sentence_indexes = []
-				highlight_offsets = []
-			highlight_page_offset_starts = []
-			highlight_page_offset_ends = []
-			for chunk_start, chunk_end in highlight_offsets:
-				page_start = chunk_page_offset_start + chunk_start if chunk_page_offset_start else chunk_start
-				page_end = chunk_page_offset_start + chunk_end if chunk_page_offset_start else chunk_end
-				highlight_page_offset_starts.append(page_start)
-				highlight_page_offset_ends.append(page_end)
-			results.append({
-				"id": payload.get("doc_id"),
-				"score": point.score,
-				"title": title,
-				"text": text,
-				"page_start": payload.get("page_start"),
-				"page_end": payload.get("page_end"),
-				"char_start": payload.get("char_start"),
-				"char_end": payload.get("char_end"),
-				"page_offset_start": highlight_page_offset_starts if highlight_page_offset_starts else payload.get("page_offset_start"),
-				"page_offset_end": highlight_page_offset_ends if highlight_page_offset_ends else payload.get("page_offset_end"),
-				"pdf_path": payload.get("pdf_path"),
-				"source": ["embeddings", "sparse"],
-				"highlighted_sentences": highlighted_sentences,
-				"highlight_sentence_indexes": highlight_sentence_indexes,
-			})
-		metadata = {
-			"query": query,
-			"top_k": top_k,
-			"strategy": "hybrid_search",
-			"document_filter": document_name,
-			"min_score": min_score,
-			"reranked": rerank_on,
-			"results_count": len(results),
-		}
-		return results, metadata
+		return _assemble_results(
+			query, search_results.points, top_k, min_score, highlight,
+			source=["embeddings", "sparse"], strategy=STRATEGY_HYBRID, document_name=document_name,
+		)
 	except Exception as e:
 		logger.error("Hybrid search error: %s: %s", type(e).__name__, e)
 		raise
+
+
+def sparse_search(
+	query: str,
+	top_k: int = 10,
+	document_name: Optional[str] = None,
+	min_score: float = 0.0,
+	highlight: bool = True,
+) -> Tuple[list[dict], dict]:
+	"""Lexical (BM42 sparse) retrieval only — no dense vector. Mirrors the SPARSE
+	value of LOAD_MODEL_STRATEGY. Fails loudly if the sparse model isn't loaded."""
+	if not _sparse_available:
+		raise RuntimeError(
+			f"sparse_search requires the sparse model, but LOAD_MODEL_STRATEGY={LOAD_MODEL_STRATEGY} "
+			"did not load it. Set LOAD_MODEL_STRATEGY=sparse_search or hybrid_search."
+		)
+	try:
+		client_qdrant = get_client()
+		with span("sparse_embed"):
+			sp = list(_sparse_encoder.embed([query]))[0]
+			sparse_vec = SparseVector(indices=sp.indices.tolist(), values=sp.values.tolist())
+		search_filter = None
+		if document_name:
+			search_filter = Filter(must=[FieldCondition(key="title", match=MatchValue(value=document_name))])
+		with span("qdrant_query"):
+			search_results = client_qdrant.query_points(
+				collection_name=COLLECTION_NAME,
+				query=sparse_vec,
+				using="sparse",
+				query_filter=search_filter,
+				limit=_rerank_fetch_limit(top_k),
+				with_payload=True,
+			)
+		return _assemble_results(
+			query, search_results.points, top_k, min_score, highlight,
+			source=["sparse"], strategy=STRATEGY_SPARSE, document_name=document_name,
+		)
+	except Exception as e:
+		logger.error("Sparse search error: %s: %s", type(e).__name__, e)
+		raise
+
+def normalize_strategy(strategy: str) -> str:
+	"""Validate/canonicalize a request strategy (case-insensitive) against
+	SEARCH_STRATEGIES. Raises ValueError on anything else."""
+	s = (strategy or "").strip().lower()
+	if s not in SEARCH_STRATEGIES:
+		raise ValueError(f"strategy must be one of {SEARCH_STRATEGIES}; got {strategy!r}")
+	return s
+
 
 def search(
 	query: str,
 	top_k: int = 10,
 	document_name: Optional[str] = None,
-	strategy: str = "semantic_search",
+	strategy: str = STRATEGY_SEMANTIC,
 	min_score: float = 0.0,
 	highlight: bool = True,
 ) -> Tuple[list[dict], dict]:
 	top_k = max(1, min(top_k, 100))
-	if strategy == "hybrid_search":
-		return hybrid_search(
-			query=query, top_k=top_k, document_name=document_name,
-			min_score=min_score, highlight=highlight,
-		)
-	else:
-		return semantic_search(
-			query=query, top_k=top_k, document_name=document_name,
-			min_score=min_score, highlight=highlight,
-		)
+	strat = normalize_strategy(strategy)
+	kwargs = dict(
+		query=query, top_k=top_k, document_name=document_name,
+		min_score=min_score, highlight=highlight,
+	)
+	if strat == STRATEGY_HYBRID:
+		return hybrid_search(**kwargs)
+	if strat == STRATEGY_SPARSE:
+		return sparse_search(**kwargs)
+	return semantic_search(**kwargs)
 
 _STATS_CACHE: dict = {"value": None, "ts": 0.0}
 _STATS_TTL_SECONDS = float(os.getenv("STATS_CACHE_TTL", "30"))

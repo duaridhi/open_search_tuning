@@ -339,7 +339,7 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--chat", action="store_true")
     ap.add_argument("--strategy", default="semantic_search",
-                    choices=["semantic_search", "hybrid_search"],
+                    choices=["semantic_search", "sparse_search", "hybrid_search"],
                     help="Search strategy passed to /search (default: semantic_search)")
     ap.add_argument(
         "--gold-dir",

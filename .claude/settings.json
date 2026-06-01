@@ -8,6 +8,8 @@
       "Bash(python3 tests/eval/patch_eval.py --run-dir tests/eval/runs/cuad_voyage_law2_hybrid_10_voyage-law-2_20260531_0357 --gold-dir tests/eval/gold/cuad_voyage_law2_hybrid_10 --dry-run)"
     ],
     "deny": [
+      "Write(.claude/**)",
+      "Edit(.claude/**)",
       "Read(../)",
       "Read(../../**)",
       "Read(~/.ssh/**)",
@@ -26,5 +28,19 @@
   "worktree": {
     "baseRef": "head"
   },
-  "teammateMode": "tmux"
+  "teammateMode": "tmux",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-protected-branch.py\"",
+            "statusMessage": "Checking branch-protection guard"
+          }
+        ]
+      }
+    ]
+  }
 }

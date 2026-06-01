@@ -32,6 +32,7 @@ from qdrant_search_hf import (
     init_qdrant,
     search,
     get_collection_stats,
+    get_search_config,
 )
 from document_utils import get_unique_documents, get_document_info
 from chat_hf import chat
@@ -274,6 +275,14 @@ async def health_check():
             status_code=503,
             detail=f"Health check failed: {str(e)}",
         )
+
+
+@app.get("/config", tags=["System"])
+async def config():
+    """Report the search configuration this server process is actually running with
+    (embedder, hybrid/reranker toggles, rerank model/pool). Used by the eval harness
+    to record the server's true config rather than inferring it from the client env."""
+    return get_search_config()
 
 
 @app.get("/search", response_model=SearchResponse, tags=["Search"])

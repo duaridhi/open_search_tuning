@@ -295,9 +295,14 @@ def _apply_highlight(query: str, cand: dict) -> None:
 @lru_cache(maxsize=512)
 def _rerank_scores_cached(query: str, texts: tuple) -> tuple:
 	"""Score (query, chunk_text) pairs with the result-reranker CrossEncoder.
-	Cached so the eval's repeated latency probes for one query reuse one forward pass."""
+	Cached so the eval's repeated latency probes for one query reuse one forward pass.
+
+	Reshape to (n_pairs, -1) and take the first logit so we return exactly one score
+	per candidate even if RERANK_MODEL is a multi-output model — a flat ravel() would
+	yield n*k scores and silently misalign with the candidate list under zip()."""
 	raw = _result_reranker.predict([(query, t) for t in texts], batch_size=32)
-	return tuple(float(x) for x in np.asarray(raw, dtype=np.float32).ravel())
+	arr = np.asarray(raw, dtype=np.float32).reshape(len(texts), -1)
+	return tuple(float(x) for x in arr[:, 0])
 
 
 def _rerank_candidates(query: str, candidates: list[dict], top_k: int) -> list[dict]:
@@ -507,3 +512,21 @@ def get_collection_stats() -> dict:
 			"points_count": None,
 			"vector_size": None,
 		}
+
+
+def get_search_config() -> dict:
+	"""Report the search-relevant configuration this process is actually running with.
+	Lets eval clients record the *server's* true config instead of inferring it from
+	their own environment (which can disagree with the server and corrupt run provenance)."""
+	return {
+		"collection": COLLECTION_NAME,
+		"embed_model": EMBEDDING_MODEL_NAME,
+		"embed_provider": EMBED_PROVIDER,
+		"hf_provider": HF_PROVIDER,
+		"enable_hybrid": ENABLE_HYBRID,
+		"enable_reranker": ENABLE_RERANKER,
+		"rerank_results": RERANK_RESULTS,
+		"rerank_model": RERANK_MODEL_ID if RERANK_RESULTS else "",
+		"rerank_pool": RERANK_POOL if RERANK_RESULTS else None,
+		"sparse_model": SPARSE_MODEL_NAME if ENABLE_HYBRID else "",
+	}

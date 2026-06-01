@@ -402,6 +402,7 @@ def main() -> int:
     log.info("Writing to %s", out_dir)
 
     # Sanity ping.
+    server_config: dict[str, Any] = {}
     with httpx.Client() as client:
         try:
             r = client.get(f"{args.base_url}/health", timeout=10.0)
@@ -409,6 +410,18 @@ def main() -> int:
         except Exception as e:
             log.error("Cannot reach %s/health: %s", args.base_url, e)
             return 3
+
+        # Pull the server's actual search config so meta records what was really
+        # under test, not whatever happens to be in this client's environment.
+        try:
+            rc = client.get(f"{args.base_url}/config", timeout=10.0)
+            if rc.status_code == 200:
+                server_config = rc.json()
+                log.info("Fetched server /config: %s", server_config)
+            else:
+                log.warning("/config returned %d; meta falls back to client env", rc.status_code)
+        except Exception as e:
+            log.warning("Could not fetch %s/config (%s); meta falls back to client env", args.base_url, e)
 
         per_query: list[dict] = []
         for i, q in enumerate(queries):
@@ -441,7 +454,11 @@ def main() -> int:
     (out_dir / "search.json").write_text(json.dumps(per_query, indent=2))
     summary = summarize(per_query, gold_contracts)
 
-    # Prepend experiment metadata so summary.json is self-describing
+    # Prepend experiment metadata so summary.json is self-describing.
+    # Server-reported config (/config) is authoritative for search-side settings;
+    # fall back to client env only when /config is unavailable. chunk_size/overlap
+    # are ingest-time settings the server does not know, so always come from env.
+    sc = server_config
     meta = {
         "run_timestamp": dt.datetime.now().isoformat(timespec="seconds"),
         "base_url": args.base_url,
@@ -449,15 +466,16 @@ def main() -> int:
         "top_k": TOP_K,
         "n_queries": len(per_query),
         "gold_dir": str(args.gold_dir),
-        "collection": os.getenv("QDRANT_COLLECTION", ""),
-        "embed_model": os.getenv("EMBED_MODEL", ""),
-        "embed_provider": os.getenv("EMBED_PROVIDER", ""),
+        "config_source": "server" if sc else "client_env",
+        "collection": sc.get("collection", os.getenv("QDRANT_COLLECTION", "")),
+        "embed_model": sc.get("embed_model", os.getenv("EMBED_MODEL", "")),
+        "embed_provider": sc.get("embed_provider", os.getenv("EMBED_PROVIDER", "")),
         "vector_size": os.getenv("VECTOR_SIZE", ""),
-        "enable_hybrid": os.getenv("ENABLE_HYBRID", "0"),
-        "enable_reranker": os.getenv("ENABLE_RERANKER", "1"),
-        "rerank_results": os.getenv("RERANK_RESULTS", "0"),
-        "rerank_model": os.getenv("RERANK_MODEL", ""),
-        "rerank_pool": os.getenv("RERANK_POOL", ""),
+        "enable_hybrid": sc.get("enable_hybrid", os.getenv("ENABLE_HYBRID", "0")),
+        "enable_reranker": sc.get("enable_reranker", os.getenv("ENABLE_RERANKER", "1")),
+        "rerank_results": sc.get("rerank_results", os.getenv("RERANK_RESULTS", "0")),
+        "rerank_model": sc.get("rerank_model", os.getenv("RERANK_MODEL", "")),
+        "rerank_pool": sc.get("rerank_pool", os.getenv("RERANK_POOL", "")),
         "chunk_size": os.getenv("CHUNK_SIZE", ""),
         "chunk_overlap": os.getenv("CHUNK_OVERLAP", ""),
         "experiment_label": args.experiment_label,

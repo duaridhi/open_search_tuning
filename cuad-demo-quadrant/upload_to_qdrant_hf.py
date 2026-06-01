@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 logger.info("Imports loaded successfully.")
 
 # %% Configuration — load .env and set constants
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env.dev")
 
 COLLECTION_NAME    = os.getenv("QDRANT_COLLECTION", "cuad_contracts")
 EMBED_MODEL        = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")

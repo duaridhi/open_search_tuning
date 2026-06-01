@@ -33,28 +33,57 @@ EMBEDDING_MODEL_NAME = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniL
 RERANKER_MODEL_ID = os.getenv("RERANKER_MODEL_ID", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 ENABLE_HYBRID = os.getenv("ENABLE_HYBRID", "0").lower() not in ("0", "false", "no")
 SPARSE_MODEL_NAME = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
+# Set ENABLE_RERANKER=0 to skip the CrossEncoder highlighting step (useful for ablation evals).
+ENABLE_RERANKER = os.getenv("ENABLE_RERANKER", "1").lower() not in ("0", "false", "no")
+
+# Result-list reranking (distinct from highlighting). When RERANK_RESULTS=1, the
+# search functions fetch a larger candidate pool (top_k * RERANK_POOL), score each
+# (query, chunk_text) pair with a CrossEncoder, and re-sort the *result list* by that
+# score before truncating to top_k. This is the precision lever: it reorders which
+# chunks rank first, unlike ENABLE_RERANKER which only highlights sentences within an
+# already-ranked chunk. Default model is small (CPU-friendly); override via RERANK_MODEL.
+RERANK_RESULTS = os.getenv("RERANK_RESULTS", "0").lower() not in ("0", "false", "no")
+RERANK_MODEL_ID = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+RERANK_POOL = max(1, int(os.getenv("RERANK_POOL", "5")))
 
 # When HF_PROVIDER is set, embed queries via the HF Inference API instead of
 # loading the model locally — needed for large models (>2 GB) that won't fit in RAM.
 HF_PROVIDER = os.getenv("HF_PROVIDER", "")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
+EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "")   # "voyageai" to use VoyageAI API
+VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY", "")
 
 _embedder = None
 _hf_embed_url: str | None = None
 _hf_embed_headers: dict | None = None
+_hf_embed_url_v1: str | None = None
+_voyage_embed_url: str | None = None
+_voyage_embed_headers: dict | None = None
 
-if HF_PROVIDER:
+if EMBED_PROVIDER == "voyageai":
+    _voyage_embed_url = "https://api.voyageai.com/v1/embeddings"
+    _voyage_embed_headers = {"Authorization": f"Bearer {VOYAGE_API_KEY}", "Content-Type": "application/json"}
+    logger.info("Query embedding via VoyageAI API: %s", EMBEDDING_MODEL_NAME)
+elif HF_PROVIDER:
     _hf_embed_url = f"https://router.huggingface.co/{HF_PROVIDER}/models/{EMBEDDING_MODEL_NAME}/pipeline/feature-extraction"
     _hf_embed_url_v1 = f"https://router.huggingface.co/{HF_PROVIDER}/v1/embeddings"
     _hf_embed_headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     logger.info("Query embedding via HF API (%s): %s", HF_PROVIDER, EMBEDDING_MODEL_NAME)
 else:
-    _hf_embed_url_v1 = None
     logger.info("Loading local embedding model: %s", EMBEDDING_MODEL_NAME)
     _embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
-logger.info("Loading local CrossEncoder reranker: %s", RERANKER_MODEL_ID)
-_reranker = CrossEncoder(RERANKER_MODEL_ID, max_length=256)
+if ENABLE_RERANKER:
+    logger.info("Loading local CrossEncoder reranker: %s", RERANKER_MODEL_ID)
+    _reranker = CrossEncoder(RERANKER_MODEL_ID, max_length=256)
+else:
+    logger.info("CrossEncoder reranker disabled (ENABLE_RERANKER=0) — highlights will be empty")
+    _reranker = None
+
+_result_reranker = None
+if RERANK_RESULTS:
+    logger.info("Loading result-reranker CrossEncoder: %s (candidate pool = top_k x %d)", RERANK_MODEL_ID, RERANK_POOL)
+    _result_reranker = CrossEncoder(RERANK_MODEL_ID, max_length=512)
 
 _sparse_encoder = None
 if ENABLE_HYBRID:
@@ -73,10 +102,41 @@ def init_qdrant():
 def get_client():
 	return get_qdrant_client()
 
+def _voyage_embed_query(query: str) -> np.ndarray:
+	"""Call VoyageAI embeddings with retry on 429 (3 req/min free-tier limit)."""
+	for attempt in range(5):
+		try:
+			resp = _requests.post(
+				_voyage_embed_url, headers=_voyage_embed_headers,
+				json={"input": [query], "model": EMBEDDING_MODEL_NAME, "input_type": "query"},
+				timeout=30,
+			)
+			resp.raise_for_status()
+			data = resp.json()
+			arr = np.array(data["data"][0]["embedding"], dtype=np.float32)
+			norm = np.linalg.norm(arr)
+			if norm > 0:
+				arr /= norm
+			return arr
+		except _requests.exceptions.HTTPError as exc:
+			status = exc.response.status_code if exc.response is not None else 0
+			if status == 429:
+				if attempt == 4:
+					raise
+				wait = 20 * (attempt + 1)
+				logger.warning("VoyageAI rate limited (429), attempt %d/5 — retrying in %ds", attempt + 1, wait)
+				time.sleep(wait)
+			else:
+				raise
+	raise RuntimeError("unreachable")
+
+
 @lru_cache(maxsize=1024)
 def _embed_query_cached(query: str) -> tuple[float, ...]:
 	_t0 = time.perf_counter()
-	if _hf_embed_url:
+	if _voyage_embed_url:
+		vec = _voyage_embed_query(query)
+	elif _hf_embed_url:
 		resp = _requests.post(
 			_hf_embed_url, headers=_hf_embed_headers,
 			json={"inputs": [query]}, timeout=30,
@@ -133,18 +193,21 @@ def highlight_text(query: str, document: str):
 
 		# Score all sentences in a single batched local forward pass
 		_reranker_t0 = time.perf_counter()
-		try:
-			with span("rerank"):
-				raw_scores = _reranker.predict([(query, s) for s in sentences], batch_size=32)
-			sentence_scores = (1.0 / (1.0 + np.exp(-np.asarray(raw_scores, dtype=np.float32)))).tolist()
-		except Exception as e:
-			logger.warning("Local CrossEncoder failed: %s", e)
+		if _reranker is not None:
+			try:
+				with span("rerank"):
+					raw_scores = _reranker.predict([(query, s) for s in sentences], batch_size=32)
+				sentence_scores = (1.0 / (1.0 + np.exp(-np.asarray(raw_scores, dtype=np.float32)))).tolist()
+			except Exception as e:
+				logger.warning("Local CrossEncoder failed: %s", e)
+				sentence_scores = [0.0] * len(sentences)
+			logger.info(
+				"Local CrossEncoder scored %d sentences in %.3fs",
+				len(sentences),
+				time.perf_counter() - _reranker_t0,
+			)
+		else:
 			sentence_scores = [0.0] * len(sentences)
-		logger.info(
-			"Local CrossEncoder scored %d sentences in %.3fs",
-			len(sentences),
-			time.perf_counter() - _reranker_t0,
-		)
 		
 		with span("highlight_assemble"):
 			# Find top-scoring sentences (above threshold)
@@ -191,6 +254,75 @@ def highlight_text(query: str, document: str):
 		logger.warning("Failed to highlight using reranker: %s", e)
 		return {"highlighted_sentences": [], "highlight_sentence_indexes": [], "highlight_offsets": []}
 
+def _build_candidate(payload: dict, score: float, source: list[str]) -> dict:
+	"""Assemble a result dict from a Qdrant point payload (highlights added later)."""
+	return {
+		"id": payload.get("doc_id"),
+		"score": score,
+		"title": payload.get("title", "Unknown"),
+		"text": payload.get("text", ""),
+		"page_start": payload.get("page_start"),
+		"page_end": payload.get("page_end"),
+		"char_start": payload.get("char_start"),
+		"char_end": payload.get("char_end"),
+		"page_offset_start": payload.get("page_offset_start"),
+		"page_offset_end": payload.get("page_offset_end"),
+		"pdf_path": payload.get("pdf_path"),
+		"source": source,
+		"highlighted_sentences": [],
+		"highlight_sentence_indexes": [],
+		"_raw_page_offset_start": payload.get("page_offset_start", 0),
+	}
+
+
+def _apply_highlight(query: str, cand: dict) -> None:
+	"""Compute sentence highlights for a finalized candidate and fold the highlight
+	offsets into page_offset_start/page_offset_end (mirrors the original inline logic)."""
+	chunk_page_offset_start = cand.get("_raw_page_offset_start", 0)
+	hl = highlight_text(query, cand["text"])
+	offsets = hl.get("highlight_offsets", [])
+	starts, ends = [], []
+	for chunk_start, chunk_end in offsets:
+		starts.append(chunk_page_offset_start + chunk_start if chunk_page_offset_start else chunk_start)
+		ends.append(chunk_page_offset_start + chunk_end if chunk_page_offset_start else chunk_end)
+	cand["highlighted_sentences"] = hl.get("highlighted_sentences", [])
+	cand["highlight_sentence_indexes"] = hl.get("highlight_sentence_indexes", [])
+	if starts:
+		cand["page_offset_start"] = starts
+		cand["page_offset_end"] = ends
+
+
+@lru_cache(maxsize=512)
+def _rerank_scores_cached(query: str, texts: tuple) -> tuple:
+	"""Score (query, chunk_text) pairs with the result-reranker CrossEncoder.
+	Cached so the eval's repeated latency probes for one query reuse one forward pass."""
+	raw = _result_reranker.predict([(query, t) for t in texts], batch_size=32)
+	return tuple(float(x) for x in np.asarray(raw, dtype=np.float32).ravel())
+
+
+def _rerank_candidates(query: str, candidates: list[dict], top_k: int) -> list[dict]:
+	"""Re-sort the candidate pool by CrossEncoder (query, chunk) score, return top_k.
+	Keeps the original vector/RRF score as `vector_score`; `score` becomes the
+	sigmoid-normalized rerank score so it stays in a comparable 0–1 range for the UI."""
+	if not _result_reranker or not candidates:
+		return candidates[:top_k]
+	texts = tuple(c["text"] for c in candidates)
+	try:
+		_t0 = time.perf_counter()
+		with span("result_rerank"):
+			scores = _rerank_scores_cached(query, texts)
+		logger.info("Result reranker scored %d candidates in %.3fs", len(texts), time.perf_counter() - _t0)
+	except Exception as e:
+		logger.warning("Result reranker failed: %s — keeping retrieval order", e)
+		return candidates[:top_k]
+	for cand, raw in zip(candidates, scores):
+		cand["vector_score"] = cand.get("score")
+		cand["rerank_score"] = raw
+		cand["score"] = float(1.0 / (1.0 + np.exp(-raw)))
+	candidates.sort(key=lambda c: c["rerank_score"], reverse=True)
+	return candidates[:top_k]
+
+
 def semantic_search(
 	query: str,
 	top_k: int = 10,
@@ -207,61 +339,37 @@ def semantic_search(
 			search_filter = Filter(
 				must=[FieldCondition(key="title", match=MatchValue(value=document_name))]
 			)
+		rerank_on = RERANK_RESULTS and _result_reranker is not None
+		fetch_limit = top_k * RERANK_POOL if rerank_on else top_k
 		with span("qdrant_query"):
 			search_results = client_qdrant.query_points(
 				collection_name=COLLECTION_NAME,
 				query=query_embedding,
 				query_filter=search_filter,
-				limit=top_k,
+				limit=fetch_limit,
 				with_payload=True,
 			)
-		results = []
-		for point in search_results.points:
-			if point.score >= min_score:
-				payload = point.payload
-				text = payload.get("text", "")
-				title = payload.get("title", "Unknown")
-				chunk_page_offset_start = payload.get("page_offset_start", 0)
-				if highlight:
-					highlights_response = highlight_text(query, text)
-					highlighted_sentences = highlights_response.get("highlighted_sentences", [])
-					highlight_sentence_indexes = highlights_response.get("highlight_sentence_indexes", [])
-					highlight_offsets = highlights_response.get("highlight_offsets", [])
-				else:
-					highlighted_sentences = []
-					highlight_sentence_indexes = []
-					highlight_offsets = []
-				highlight_page_offset_starts = []
-				highlight_page_offset_ends = []
-				for chunk_start, chunk_end in highlight_offsets:
-					page_start = chunk_page_offset_start + chunk_start if chunk_page_offset_start else chunk_start
-					page_end = chunk_page_offset_start + chunk_end if chunk_page_offset_start else chunk_end
-					highlight_page_offset_starts.append(page_start)
-					highlight_page_offset_ends.append(page_end)
-				results.append(
-					{
-						"id": payload.get("doc_id"),
-						"score": point.score,
-						"title": title,
-						"text": text,
-						"page_start": payload.get("page_start"),
-						"page_end": payload.get("page_end"),
-						"char_start": payload.get("char_start"),
-						"char_end": payload.get("char_end"),
-						"page_offset_start": highlight_page_offset_starts if highlight_page_offset_starts else payload.get("page_offset_start"),
-						"page_offset_end": highlight_page_offset_ends if highlight_page_offset_ends else payload.get("page_offset_end"),
-						"pdf_path": payload.get("pdf_path"),
-						"source": ["embeddings"],
-						"highlighted_sentences": highlighted_sentences,
-						"highlight_sentence_indexes": highlight_sentence_indexes,
-					}
-				)
+		candidates = [
+			_build_candidate(point.payload, point.score, ["embeddings"])
+			for point in search_results.points
+			if point.score >= min_score
+		]
+		if rerank_on:
+			candidates = _rerank_candidates(query, candidates, top_k)
+		else:
+			candidates = candidates[:top_k]
+		for cand in candidates:
+			if highlight:
+				_apply_highlight(query, cand)
+			cand.pop("_raw_page_offset_start", None)
+		results = candidates
 		metadata = {
 			"query": query,
 			"top_k": top_k,
 			"strategy": "semantic_search",
 			"document_filter": document_name,
 			"min_score": min_score,
+			"reranked": rerank_on,
 			"results_count": len(results),
 		}
 		return results, metadata
@@ -289,61 +397,39 @@ def hybrid_search(
 		search_filter = None
 		if document_name:
 			search_filter = Filter(must=[FieldCondition(key="title", match=MatchValue(value=document_name))])
+		rerank_on = RERANK_RESULTS and _result_reranker is not None
+		fetch_limit = top_k * RERANK_POOL if rerank_on else top_k
 		with span("qdrant_query"):
 			search_results = client_qdrant.query_points(
 				collection_name=COLLECTION_NAME,
 				prefetch=[
-					Prefetch(query=query_embedding, using="", limit=top_k * 2, filter=search_filter),
-					Prefetch(query=sparse_vec, using="sparse", limit=top_k * 2, filter=search_filter),
+					Prefetch(query=query_embedding, using="", limit=fetch_limit * 2, filter=search_filter),
+					Prefetch(query=sparse_vec, using="sparse", limit=fetch_limit * 2, filter=search_filter),
 				],
 				query=FusionQuery(fusion=Fusion.RRF),
-				limit=top_k,
+				limit=fetch_limit,
 				with_payload=True,
 			)
-		results = []
-		for point in search_results.points:
-			payload = point.payload
-			text = payload.get("text", "")
-			title = payload.get("title", "Unknown")
-			chunk_page_offset_start = payload.get("page_offset_start", 0)
+		candidates = [
+			_build_candidate(point.payload, point.score, ["embeddings", "sparse"])
+			for point in search_results.points
+		]
+		if rerank_on:
+			candidates = _rerank_candidates(query, candidates, top_k)
+		else:
+			candidates = candidates[:top_k]
+		for cand in candidates:
 			if highlight:
-				highlights_response = highlight_text(query, text)
-				highlighted_sentences = highlights_response.get("highlighted_sentences", [])
-				highlight_sentence_indexes = highlights_response.get("highlight_sentence_indexes", [])
-				highlight_offsets = highlights_response.get("highlight_offsets", [])
-			else:
-				highlighted_sentences = []
-				highlight_sentence_indexes = []
-				highlight_offsets = []
-			highlight_page_offset_starts = []
-			highlight_page_offset_ends = []
-			for chunk_start, chunk_end in highlight_offsets:
-				page_start = chunk_page_offset_start + chunk_start if chunk_page_offset_start else chunk_start
-				page_end = chunk_page_offset_start + chunk_end if chunk_page_offset_start else chunk_end
-				highlight_page_offset_starts.append(page_start)
-				highlight_page_offset_ends.append(page_end)
-			results.append({
-				"id": payload.get("doc_id"),
-				"score": point.score,
-				"title": title,
-				"text": text,
-				"page_start": payload.get("page_start"),
-				"page_end": payload.get("page_end"),
-				"char_start": payload.get("char_start"),
-				"char_end": payload.get("char_end"),
-				"page_offset_start": highlight_page_offset_starts if highlight_page_offset_starts else payload.get("page_offset_start"),
-				"page_offset_end": highlight_page_offset_ends if highlight_page_offset_ends else payload.get("page_offset_end"),
-				"pdf_path": payload.get("pdf_path"),
-				"source": ["embeddings", "sparse"],
-				"highlighted_sentences": highlighted_sentences,
-				"highlight_sentence_indexes": highlight_sentence_indexes,
-			})
+				_apply_highlight(query, cand)
+			cand.pop("_raw_page_offset_start", None)
+		results = candidates
 		metadata = {
 			"query": query,
 			"top_k": top_k,
 			"strategy": "hybrid_search",
 			"document_filter": document_name,
 			"min_score": min_score,
+			"reranked": rerank_on,
 			"results_count": len(results),
 		}
 		return results, metadata

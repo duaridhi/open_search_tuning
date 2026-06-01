@@ -22,15 +22,8 @@ Do NOT invoke for: latency profiling (`/perf`), pre-ingest dataset profiling
 
 Check both before running anything; stop with a clear message if either fails:
 
-1. **Gold files exist.** Check that `tests/eval/gold.json` and
-   `tests/eval/gold_contracts.json` are present. If either is missing, tell the
-   user and offer to run `build_gold.py` first.
-2. **Server reachable.** `curl -sf http://localhost:8000/health` must succeed. If
-   not, tell the user to start the server:
-   ```
-   uvicorn app:app --reload --host 0.0.0.0 --port 8000
-   ```
-   and stop.
+1. **Gold files exist.** For the default collection, check `tests/eval/gold.json` and `tests/eval/gold_contracts.json`. For a named experiment collection, gold lives under `tests/eval/gold/<collection>/`. If missing, offer to run `build_gold.py --collection <name> --out-dir tests/eval/gold/<name>/`.
+2. **Server reachable.** `curl -sf http://localhost:<port>/health` must succeed. If not, tell the user to start the server and stop.
 
 ## Step 1 — (optional) rebuild gold
 
@@ -62,10 +55,20 @@ python tests/eval/run_eval.py
 python tests/eval/run_eval.py --chat
 ```
 
-**Against a non-default server:**
+**Against a non-default server / collection:**
 ```bash
-python tests/eval/run_eval.py --base-url http://localhost:8001
+python tests/eval/run_eval.py --base-url http://localhost:8011 \
+  --gold-dir tests/eval/gold/cuad_minilm_hybrid_50
 ```
+
+**Hybrid search strategy (for collections ingested with ENABLE_HYBRID=1):**
+```bash
+python tests/eval/run_eval.py --base-url http://localhost:8011 \
+  --gold-dir tests/eval/gold/cuad_minilm_hybrid_50 \
+  --strategy hybrid_search
+```
+
+The `--strategy` argument accepts `semantic_search` (default) or `hybrid_search`. Always pass `hybrid_search` when evaluating a hybrid collection — the server must also be started with `ENABLE_HYBRID=1`.
 
 Output goes to `tests/eval/runs/<timestamp>/summary.json` (and `search.json`
 for per-query detail).

@@ -1,6 +1,6 @@
 ---
 name: search-perf
-description: Owns the latency and quality trade-off on the `/search` and `/chat` paths in this repo — specifically `qdrant_search_hf.py` (query embedding, sentence reranking, highlighting) and `chat_hf.py` (RAG prompt + chat-completion call). Use this agent for any change aimed at making search faster, reducing token usage, or swapping embedding / reranker / chat models. Knows the per-sentence reranker hotspot, the 384-d index invariant, and which free/local models are approved drop-ins.
+description: Owns the latency and quality trade-off on the `/search` and `/chat` paths in this repo — specifically `qdrant_search_hf.py` (query embedding, sentence reranking, highlighting, hybrid RRF search) and `chat_hf.py` (RAG prompt + chat-completion call). Use this agent for any change aimed at making search faster, reducing token usage, or swapping embedding / reranker / chat models. Knows the per-sentence reranker hotspot, the model-dependent vector dimension invariant, and which free/local models are approved drop-ins.
 tools: Read, Edit, Bash, Grep, Glob
 isolation: worktree
 ---
@@ -23,9 +23,10 @@ You make `/search` and `/chat` faster and cheaper without losing answer quality.
 
 # Hard invariants — do not break
 
-1. **Vector dimension stays 384.** Changing it would require re-ingesting the entire collection. If you genuinely need a different embedding model, stop and hand off to `cuad-ingest` — the two sides must move together.
-2. **Query embedder must match the indexed embedder.** Currently `sentence-transformers/all-MiniLM-L6-v2`. Same model, same `normalize_embeddings=True`.
+1. **Vector dimension must match the indexed model.** The collection's `vector_size` is set at ingest time — 384 (MiniLM), 768 (MPNet), 1024 (bge-large). Changing it requires re-ingesting. If you need a different model, coordinate with `cuad-ingest` — both sides must move together.
+2. **Query embedder must match the indexed embedder.** Set via `EMBED_MODEL` env var; defaults to `sentence-transformers/all-MiniLM-L6-v2`. Same model, same `normalize_embeddings=True`.
 3. **Don't touch the payload reads** in [qdrant_search_hf.py:204-221](../../cuad-demo-quadrant/qdrant_search_hf.py#L204-L221) without checking the `SearchResult` pydantic model in [app.py:69-104](../../app.py#L69-L104). Field renames break the API contract.
+4. **`ENABLE_HYBRID=1` activates the RRF fusion path** (`hybrid_search()` in `qdrant_search_hf.py`). When enabled, the server also loads the BM42 sparse model at startup. The collection must have been ingested with `ENABLE_HYBRID=1` too — a hybrid query against a dense-only collection will fall back to `semantic_search()`.
 4. **Highlight quality bar**: on the canonical queries (*"indemnification clause"*, *"termination for convenience"*, *"governing law"*, *"limitation of liability"*, *"assignment restrictions"*), the top-5 highlighted sentences must remain "obviously about the right thing." Use the `rag-eval` agent to verify if it exists; otherwise eyeball 3 queries before and after.
 5. **Don't read `.env*` files.** Variable names are in CLAUDE.md and source.
 

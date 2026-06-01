@@ -2,11 +2,11 @@
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   },
-  "teammateMode": "tmux",
-  "worktree": {
-    "baseRef": "head"
-  },
   "permissions": {
+    "allow": [
+      "WebFetch(domain:ginntonicfun-cuad-ai-demo.hf.space)",
+      "Bash(python3 tests/eval/patch_eval.py --run-dir tests/eval/runs/cuad_voyage_law2_hybrid_10_voyage-law-2_20260531_0357 --gold-dir tests/eval/gold/cuad_voyage_law2_hybrid_10 --dry-run)"
+    ],
     "deny": [
       "Read(../)",
       "Read(../../**)",
@@ -14,9 +14,17 @@
       "Read(~/.aws/**)",
       "Read(~/.gnupg/**)",
       "Bash(sudo *)",
-      "Bash(rm -rf /*)"
+      "Bash(rm -rf /*)",
+      "Read(**/.env*)",
+      "Read(**/id_rsa*)",
+      "Read(**/.ssh/**)",
+      "Read(~/.claude/settings.json)"
+
     ],
     "defaultMode": "bypassPermissions"
-
-  }
+  },
+  "worktree": {
+    "baseRef": "head"
+  },
+  "teammateMode": "tmux"
 }

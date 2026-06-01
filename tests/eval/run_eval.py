@@ -29,6 +29,7 @@ import datetime as dt
 import json
 import logging
 import math
+import os
 import re
 import statistics
 import sys
@@ -70,6 +71,8 @@ METRIC_KEYS = [
     "recall@20",
     "precision@5",
     "precision@10",
+    "mrr@5",
+    "mrr@10",
     "mrr@20",
     "ndcg@10",
 ]
@@ -123,6 +126,8 @@ def compute_metrics(retrieved: list, gold: set) -> dict:
         "recall@20": recall_at_k(retrieved, gold, 20),
         "precision@5": precision_at_k(retrieved, gold, 5),
         "precision@10": precision_at_k(retrieved, gold, 10),
+        "mrr@5": mrr(retrieved, gold, 5),
+        "mrr@10": mrr(retrieved, gold, 10),
         "mrr@20": mrr(retrieved, gold, 20),
         "ndcg@10": ndcg_at_k(retrieved, gold, 10),
     }
@@ -343,6 +348,19 @@ def main() -> int:
         help="Directory containing gold.json / gold_contracts.json / gold_spans.json "
              "(default: tests/eval/). Pass the --out-dir used by build_gold.py.",
     )
+    ap.add_argument(
+        "--query-sleep",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="Sleep between queries (default: 0). Set to ~21 when using VoyageAI free tier "
+             "(3 req/min limit) to avoid 429 retries that can push requests past SEARCH_TIMEOUT.",
+    )
+    ap.add_argument(
+        "--experiment-label",
+        default="",
+        help="Optional free-text label stored in summary.json metadata (e.g. 'no_reranker').",
+    )
     args = ap.parse_args()
 
     gold_path          = args.gold_dir / "gold.json"
@@ -417,9 +435,35 @@ def main() -> int:
                 strategy=args.strategy,
             )
             per_query.append(row)
+            if args.query_sleep > 0 and i < len(queries) - 1:
+                time.sleep(args.query_sleep)
 
     (out_dir / "search.json").write_text(json.dumps(per_query, indent=2))
     summary = summarize(per_query, gold_contracts)
+
+    # Prepend experiment metadata so summary.json is self-describing
+    meta = {
+        "run_timestamp": dt.datetime.now().isoformat(timespec="seconds"),
+        "base_url": args.base_url,
+        "strategy": args.strategy,
+        "top_k": TOP_K,
+        "n_queries": len(per_query),
+        "gold_dir": str(args.gold_dir),
+        "collection": os.getenv("QDRANT_COLLECTION", ""),
+        "embed_model": os.getenv("EMBED_MODEL", ""),
+        "embed_provider": os.getenv("EMBED_PROVIDER", ""),
+        "vector_size": os.getenv("VECTOR_SIZE", ""),
+        "enable_hybrid": os.getenv("ENABLE_HYBRID", "0"),
+        "enable_reranker": os.getenv("ENABLE_RERANKER", "1"),
+        "rerank_results": os.getenv("RERANK_RESULTS", "0"),
+        "rerank_model": os.getenv("RERANK_MODEL", ""),
+        "rerank_pool": os.getenv("RERANK_POOL", ""),
+        "chunk_size": os.getenv("CHUNK_SIZE", ""),
+        "chunk_overlap": os.getenv("CHUNK_OVERLAP", ""),
+        "experiment_label": args.experiment_label,
+    }
+    summary = {"meta": meta, **summary}
+
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     log.info("Done. Summary written to %s/summary.json", out_dir)
     return 0

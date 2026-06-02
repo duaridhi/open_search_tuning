@@ -628,6 +628,8 @@ async def chat_endpoint(request: ChatRequest, response: Response = None) -> Chat
                         request.top_k,
                         request.document_name,
                         request.strategy,
+                        0.0,                       # min_score
+                        SEARCH_HIGHLIGHT_DEFAULT,  # honor SEARCH_HIGHLIGHT instead of hardcoded True
                     ),
                     timeout=SEARCH_TIMEOUT,
                 )

@@ -27,23 +27,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [document_utils.py](cuad-demo-quadrant/document_utils.py) — scans Qdrant via `scroll` to enumerate unique documents and per-document chunk stats.
 - [s3_utils.py](cuad-demo-quadrant/s3_utils.py) — legacy MinIO/S3 helpers (used only by `app_minio.py`).
 - [ingest_cuad_hf_bucket.py](cuad-demo-quadrant/ingest_cuad_hf_bucket.py) / [cuad_download_utils.py](cuad-demo-quadrant/cuad_download_utils.py) — one-off ingestion pipeline: download CUAD, push PDFs to the HF dataset repo.
-- [upload_to_qdrant.py](cuad-demo-quadrant/upload_to_qdrant.py) — embeds chunks and upserts them into the `cuad_contracts` collection.
+- [upload_to_qdrant.py](cuad-demo-quadrant/upload_to_qdrant.py) — legacy ingest script (uses local PDF path).
+- [upload_to_qdrant_hf.py](cuad-demo-quadrant/upload_to_qdrant_hf.py) — **active** ingest script; fully env-var driven; supports hybrid (dense + BM42 sparse) via `ENABLE_HYBRID=1`.
 
 ### Qdrant collection
-- Name: `cuad_contracts` (override with `QDRANT_COLLECTION`).
-- Vector size: **384** (matches `sentence-transformers/all-MiniLM-L6-v2`).
+- Default name: `cuad_contracts` (override with `QDRANT_COLLECTION`). Experiment collections follow the pattern `cuad_{model}_{hybrid_}N` (e.g. `cuad_minilm_hybrid_50`).
+- Vector size: model-dependent — **384** (MiniLM), **768** (MPNet), **1024** (bge-large). Set via `VECTOR_SIZE` at ingest time.
 - Distance: cosine.
+- Sparse vectors: present when collection was created with `ENABLE_HYBRID=1` (`sparse_vectors_config={"sparse": SparseVectorParams()}`).
 - Payload fields: `doc_id`, `title`, `text`, `page_start`, `page_end`, `pdf_path`, `char_start`, `char_end`, `page_offset_start`, `page_offset_end`.
 
 ## Models in use
 
 | Role | Model | Where |
 | --- | --- | --- |
-| Query embedding | `sentence-transformers/all-MiniLM-L6-v2` | [qdrant_search_hf.py:27](cuad-demo-quadrant/qdrant_search_hf.py#L27) |
+| Query embedding | `sentence-transformers/all-MiniLM-L6-v2` (default; override via `EMBED_MODEL`) | [qdrant_search_hf.py:27](cuad-demo-quadrant/qdrant_search_hf.py#L27) |
+| Sparse (hybrid) | `Qdrant/bm42-all-minilm-l6-v2-attentions` (override via `SPARSE_MODEL`); only loaded when `ENABLE_HYBRID=1` | [qdrant_search_hf.py](cuad-demo-quadrant/qdrant_search_hf.py) |
 | Sentence reranker (highlight) | `BAAI/bge-reranker-v2-m3` | [qdrant_search_hf.py:28](cuad-demo-quadrant/qdrant_search_hf.py#L28) |
 | RAG chat | `Qwen/Qwen3-235B-A22B:novita` (env: `CHAT_MODEL`) | [chat_hf.py:24](cuad-demo-quadrant/chat_hf.py#L24) |
 
-All three are invoked through `huggingface_hub.InferenceClient` and require `HF_TOKEN`.
+Query embedding and reranker are invoked through `huggingface_hub.InferenceClient`. The sparse model (BM42) is loaded locally via `fastembed`. All require `HF_TOKEN` except the local sparse model.
 
 ## API endpoints (from [app.py](app.py))
 
@@ -89,6 +92,10 @@ Key variables (names only — see source for usage):
 - `HF_REPO_ID`, `HF_REPO_TYPE`, `HF_REVISION` — HF dataset repo holding PDFs.
 - `QDRANT_URL` or `CLUSTER_URL` + `QDRANT_API_KEY`, `QDRANT_PORT` — Qdrant target.
 - `QDRANT_COLLECTION` — defaults to `cuad_contracts`.
+- `EMBED_MODEL` — dense embedding model for both ingest and query. Default: `sentence-transformers/all-MiniLM-L6-v2`. Must be passed to the uvicorn process explicitly (not just exported in the shell).
+- `VECTOR_SIZE` — dense vector dimension; must match `EMBED_MODEL` output. Set at ingest time and must be consistent on the query side.
+- `ENABLE_HYBRID` — set `1` to enable BM42 sparse vectors. Must be set on both ingest and server.
+- `SPARSE_MODEL` — sparse embedding model. Default: `Qdrant/bm42-all-minilm-l6-v2-attentions`. Only used when `ENABLE_HYBRID=1`.
 - `CHAT_MODEL` — overrides the default chat model.
 - `LOG_LEVEL`, `INIT_QDRANT_TIMEOUT`, `INIT_HF_TIMEOUT`, `COLLECTION_STATS_TIMEOUT`, `SEARCH_TIMEOUT`, `DOCS_LIST_TIMEOUT`, `DOCS_DETAIL_TIMEOUT`, `CHAT_TIMEOUT` — operational tuning.
 

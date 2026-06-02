@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 logger.info("File path is: %s", Path(__file__).resolve())
 # Load environment variables from .env
-env_path = Path(__file__).resolve().parent / ".env"
+env_path = Path(__file__).resolve().parent.parent / ".env.dev"
 logger.info(f"Loading environment variables from: {env_path}");
 if env_path.exists():
     load_dotenv(env_path)

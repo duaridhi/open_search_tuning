@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 logger.info("Imports loaded successfully.")
 
 # %% Configuration — load .env and set constants
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env.dev")
 
 COLLECTION_NAME    = os.getenv("QDRANT_COLLECTION", "cuad_contracts")
 EMBED_MODEL        = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
@@ -91,6 +91,7 @@ UPLOAD_BATCH_SIZE  = int(os.getenv("UPLOAD_BATCH_SIZE", "100"))
 SKIP_INGESTED_DOCS = os.getenv("SKIP_INGESTED_DOCS", "1").lower() not in ("0", "false", "no")
 ENABLE_HYBRID    = os.getenv("ENABLE_HYBRID", "0").lower() not in ("0", "false", "no")
 SPARSE_MODEL_NAME = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
+EMBED_PROVIDER   = os.getenv("EMBED_PROVIDER", "hf")   # "hf" or "voyageai"
 
 _CUAD_DATA_BASE = Path(
     "/home/ridhi/projects/project1/open_search_tuning"
@@ -99,8 +100,11 @@ _CUAD_DATA_BASE = Path(
 PDF_ROOT = Path(os.getenv("PDF_ROOT", str(_CUAD_DATA_BASE / "full_contract_pdf")))
 
 HF_TOKEN = os.getenv("HF_TOKEN", "")
-if not HF_TOKEN:
-    raise EnvironmentError("HF_TOKEN is required for the HF Inference API ingest path.")
+VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY", "")
+if EMBED_PROVIDER == "voyageai" and not VOYAGE_API_KEY:
+    raise EnvironmentError("VOYAGE_API_KEY is required when EMBED_PROVIDER=voyageai.")
+if EMBED_PROVIDER != "voyageai" and not HF_TOKEN:
+    raise EnvironmentError("HF_TOKEN is required when EMBED_PROVIDER=hf.")
 
 logger.info(
     "Config loaded: COLLECTION=%s  EMBED_MODEL=%s  DOC_OFFSET=%d  DOC_COUNT=%d  MAX_DOCS=%d  "
@@ -116,6 +120,21 @@ _HF_EMBED_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 
 _HF_EMBED_URL_V1 = f"https://router.huggingface.co/{HF_PROVIDER}/v1/embeddings"
+
+_VOYAGE_EMBED_URL = "https://api.voyageai.com/v1/embeddings"
+_VOYAGE_EMBED_HEADERS = {"Authorization": f"Bearer {VOYAGE_API_KEY}", "Content-Type": "application/json"}
+
+
+def _voyage_api_embed(texts: list[str]) -> list:
+    resp = requests.post(
+        _VOYAGE_EMBED_URL,
+        headers=_VOYAGE_EMBED_HEADERS,
+        json={"input": texts, "model": EMBED_MODEL, "input_type": "document"},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return [item["embedding"] for item in sorted(data["data"], key=lambda x: x["index"])]
 
 
 def _hf_api_embed(texts: list[str]) -> list:
@@ -174,22 +193,34 @@ def _pool(raw) -> np.ndarray:
 
 
 def _encode(texts: list[str]) -> np.ndarray:
-    """Call HF feature_extraction in sub-batches; return L2-normalised float32 array."""
+    """Call embedding API in sub-batches; return L2-normalised float32 array."""
     all_embs: list[np.ndarray] = []
     for i in range(0, len(texts), ENCODE_BATCH_SIZE):
         batch = texts[i : i + ENCODE_BATCH_SIZE]
-        for attempt in range(3):
+        for attempt in range(5):
             try:
-                raw = _hf_api_embed(batch)
+                raw = _voyage_api_embed(batch) if EMBED_PROVIDER == "voyageai" else _hf_api_embed(batch)
                 break
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                if status == 429:
+                    if attempt == 4:
+                        raise
+                    # VoyageAI free tier: 3 req/min → must wait ≥20 s; back off more on repeats
+                    wait = 20 * (attempt + 1)   # 20 s, 40 s, 60 s, 80 s
+                    logger.warning("Rate limited (429), attempt %d/5 — retrying in %ds", attempt + 1, wait)
+                    time.sleep(wait)
+                else:
+                    if attempt == 2:
+                        raise
+                    wait = 5 * (2 ** attempt)
+                    logger.warning("Embed failed (attempt %d/3): %s — retrying in %ds", attempt + 1, exc, wait)
+                    time.sleep(wait)
             except Exception as exc:
                 if attempt == 2:
                     raise
-                wait = 5 * (2 ** attempt)   # 5 s, 10 s
-                logger.warning(
-                    "feature_extraction failed (attempt %d/3): %s — retrying in %ds",
-                    attempt + 1, exc, wait,
-                )
+                wait = 5 * (2 ** attempt)
+                logger.warning("Embed failed (attempt %d/3): %s — retrying in %ds", attempt + 1, exc, wait)
                 time.sleep(wait)
         all_embs.append(_pool(raw))
         if ENCODE_SLEEP_S > 0:
@@ -208,7 +239,8 @@ if _vector_size_env:
     logger.info("VECTOR_SIZE from env: %d", VECTOR_SIZE)
 else:
     logger.info("VECTOR_SIZE not set — probing model with a test embedding ...")
-    _probe = _pool(_hf_api_embed(["probe"]))
+    _probe_raw = _voyage_api_embed(["probe"]) if EMBED_PROVIDER == "voyageai" else _hf_api_embed(["probe"])
+    _probe = _pool(_probe_raw)
     VECTOR_SIZE = int(_probe.shape[-1])
     logger.info("Auto-detected VECTOR_SIZE: %d  (output shape: %s)", VECTOR_SIZE, _probe.shape)
 

@@ -19,7 +19,7 @@ from perf_trace import span
 
 logger = logging.getLogger(__name__)
 
-env_path = Path(__file__).parent / ".env"
+env_path = Path(__file__).resolve().parent.parent / ".env.dev"
 load_dotenv(env_path)
 
 HF_TOKEN = os.getenv("HF_TOKEN")

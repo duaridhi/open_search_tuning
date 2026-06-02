@@ -187,7 +187,7 @@ def hybrid_search(
     For now, this is equivalent to semantic_search since Qdrant stores
     pre-computed embeddings. In the future, could implement:
     - BM25 via full-text search (requires additional indexing)
-    - RRF fusion of BM25 + semantic scores
+    -  fusion of BM25 + semantic scores
 
     Args:
         query: Search text

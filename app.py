@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 # Import Qdrant search and utilities
 import sys
 from pathlib import Path as PathLib
+from dotenv import load_dotenv
 
 qdrant_dir = PathLib(__file__).parent / "cuad-demo-quadrant"
 sys.path.insert(0, str(qdrant_dir))
@@ -32,6 +33,9 @@ from qdrant_search_hf import (
     init_qdrant,
     search,
     get_collection_stats,
+    warmup_inference,
+    normalize_strategy,
+    SEARCH_STRATEGIES,
 )
 from document_utils import get_unique_documents, get_document_info
 from chat_hf import chat
@@ -43,14 +47,23 @@ from hf_utils import init_hf_client, generate_hf_url, list_hf_documents
 # ─────────────────────────────────────────────────────────────────────────────
 # Logger Configuration
 # ─────────────────────────────────────────────────────────────────────────────
+# Logger Configuration
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
     ],
 )
 logger = logging.getLogger(__name__)
+
+logger.info("File path is: %s", PathLib(__file__).resolve())
+# Load environment variables from .env
+env_path = PathLib(__file__).resolve().parent / ".env.dev"
+logger.info(f"Loading environment variables from: {env_path}");
+if env_path.exists():
+    load_dotenv(env_path)
+    logger.info(f"Path found: {env_path}");
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -62,6 +75,19 @@ COLLECTION_STATS_TIMEOUT = int(os.getenv("COLLECTION_STATS_TIMEOUT", "10"))
 SEARCH_TIMEOUT = int(os.getenv("SEARCH_TIMEOUT", "60"))
 DOCS_LIST_TIMEOUT = int(os.getenv("DOCS_LIST_TIMEOUT", "20"))
 DOCS_DETAIL_TIMEOUT = int(os.getenv("DOCS_DETAIL_TIMEOUT", "15"))
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "cuad_contracts")
+
+# Default for /search ?highlight= . Per-sentence highlighting fires ~20 HF reranker
+# calls per result, the dominant latency cost. The result-list reranker already
+# orders results, so highlights are not needed for ranking — default OFF for latency.
+# Flip back on with SEARCH_HIGHLIGHT=true (or per-request ?highlight=true).
+SEARCH_HIGHLIGHT_DEFAULT = os.getenv("SEARCH_HIGHLIGHT", "true").lower() not in ("0", "false", "no")
+
+# When true, fire one cheap embed + one cheap reranker call on startup (in a
+# background task) to warm the HF serverless endpoints and cut first-query
+# cold-start. Non-blocking and non-fatal. Default off. HF Pro raises rate limits,
+# so warm-up plus the 16-worker parallel rerank won't throttle.
+WARMUP_ON_START = os.getenv("WARMUP_ON_START", "false").lower() not in ("0", "false", "no")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -103,6 +129,16 @@ class SearchResult(BaseModel):
     highlight_sentence_indexes: list[int] = Field(
         default=[],
         description="Indexes of highlighted sentences",
+    )
+    matched_keywords: list[str] = Field(
+        default=[],
+        description="Distinct query keywords that matched this chunk (BM42 stem-based). "
+                    "Populated only for sparse_search/hybrid_search; empty otherwise.",
+    )
+    keyword_offsets: list[list[int]] = Field(
+        default=[],
+        description="[start, end] char ranges within `text` for each matched-keyword "
+                    "occurrence. Populated only for sparse_search/hybrid_search.",
     )
 
 
@@ -203,7 +239,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Could not fetch collection stats: {e}", exc_info=True)
 
+    # Optional serverless warm-up — non-blocking background task, never delays
+    # startup or health checks. Gated by WARMUP_ON_START; failures are logged
+    # inside warmup_inference() and swallowed here.
+    if WARMUP_ON_START:
+        async def _run_warmup():
+            try:
+                await asyncio.to_thread(warmup_inference)
+            except Exception as e:
+                logger.warning(f"Warm-up task failed (non-fatal): {e}")
+        warmup_task = asyncio.create_task(_run_warmup())
+        logger.info("Serverless warm-up dispatched in background (WARMUP_ON_START=1)")
+    else:
+        warmup_task = None
+
     yield  # App runs here
+
+    if warmup_task is not None and not warmup_task.done():
+        warmup_task.cancel()
 
     logger.info("Shutting down CUAD Qdrant API...")
 
@@ -280,8 +333,8 @@ async def health_check():
 async def search_contracts(
     q: str = Query(..., description="Search query", min_length=1),
     top_k: int = Query(
-        10,
-        description="Number of results",
+        int(os.getenv("SEARCH_TOP_K", "20")),
+        description="Number of results (default from SEARCH_TOP_K; operating point 20)",
         ge=1,
         le=100,
     ),
@@ -291,11 +344,12 @@ async def search_contracts(
     ),
     strategy: str = Query(
         "semantic_search",
-        description="Search strategy: semantic_search or hybrid_search",
+        description="Search strategy: semantic_search (dense), sparse_search (BM42), "
+                    "or hybrid_search (weighted-RRF fusion).",
     ),
     highlight: bool = Query(
-        True,
-        description="If false, skip per-sentence reranking and return chunks without highlights. Faster.",
+        SEARCH_HIGHLIGHT_DEFAULT,
+        description="If false, skip per-sentence reranking and return chunks without highlights. Faster. Default from SEARCH_HIGHLIGHT (off).",
     ),
     response: Response = None,
 ) -> SearchResponse:
@@ -316,6 +370,10 @@ async def search_contracts(
         f"Search request: query='{q}', top_k={top_k}, document_name={document_name}, "
         f"strategy={strategy}, highlight={highlight}"
     )
+    try:
+        strategy = normalize_strategy(strategy)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     start_trace()
     try:
         try:
@@ -363,6 +421,8 @@ async def search_contracts(
                     source=r.get("source", ["embeddings"]),
                     highlighted_sentences=r.get("highlighted_sentences", []),
                     highlight_sentence_indexes=r.get("highlight_sentence_indexes", []),
+                    matched_keywords=r.get("matched_keywords", []),
+                    keyword_offsets=r.get("keyword_offsets", []),
                 )
             )
         
@@ -405,7 +465,7 @@ async def list_documents() -> DocumentListResponse:
                 timeout=INIT_QDRANT_TIMEOUT
             )
             qdrant_documents = await asyncio.wait_for(
-                asyncio.to_thread(get_unique_documents, qdrant_client, "cuad_contracts"),
+                asyncio.to_thread(get_unique_documents, qdrant_client, QDRANT_COLLECTION),
                 timeout=DOCS_LIST_TIMEOUT
             )
         except asyncio.TimeoutError:
@@ -534,7 +594,7 @@ class ChatRequest(BaseModel):
     query: str = Field(..., description="User question", min_length=1)
     top_k: int = Field(5, description="Number of search results to use as context", ge=1, le=20)
     document_name: Optional[str] = Field(None, description="Filter search to a specific contract")
-    strategy: str = Field("semantic_search", description="Search strategy")
+    strategy: str = Field("semantic_search", description="Search strategy: semantic_search, sparse_search, or hybrid_search")
     system_prompt: Optional[str] = Field(None, description="Override default system instructions")
 
 
@@ -552,6 +612,10 @@ async def chat_endpoint(request: ChatRequest, response: Response = None) -> Chat
     then generates a grounded answer via HuggingFace Inference API.
     """
     logger.info(f"Chat request: query='{request.query}', top_k={request.top_k}")
+    try:
+        request.strategy = normalize_strategy(request.strategy)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     start_trace()
     _t_chat_start = time.perf_counter()
     try:
@@ -605,6 +669,8 @@ async def chat_endpoint(request: ChatRequest, response: Response = None) -> Chat
                     source=r.get("source", ["embeddings"]),
                     highlighted_sentences=r.get("highlighted_sentences", []),
                     highlight_sentence_indexes=r.get("highlight_sentence_indexes", []),
+                    matched_keywords=r.get("matched_keywords", []),
+                    keyword_offsets=r.get("keyword_offsets", []),
                 )
             )
         logger.info(f"Chat answered query '{request.query}' using {len(results)} passages")

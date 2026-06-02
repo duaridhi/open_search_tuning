@@ -264,21 +264,25 @@ def check_truncation(
     truncated.sort(key=lambda x: x["gap"], reverse=True)
     if truncated:
         log.warning(
-            "TRUNCATION: %d titles have gap > %d chars between CUAD source length "
-            "and max ingested char_end. Largest gap: %d (%s). "
-            "Run tests/eval/INGEST_HANDOFF.md remediation.",
+            "TXT/PDF DRIFT: %d titles have gap > %d chars between CUAD source length "
+            "(TXT-based) and max ingested char_end (PDF-extracted). Largest gap: %d (%s). "
+            "This is expected — CUAD annotations use .txt char offsets; ingest uses PDF "
+            "extraction which strips headers/footers/page numbers producing shorter text. "
+            "Chunk-level eval (gold.json) uses text matching and is unaffected. "
+            "See tests/eval/INGEST_HANDOFF.md for details.",
             len(truncated), threshold,
             truncated[0]["gap"], truncated[0]["title"][:60],
         )
         for t in truncated[:5]:
+            pct = t["gap"] / t["source_length"] * 100
             log.warning(
-                "  gap=%6d  qdrant_max=%7d  src_len=%7d  %s",
-                t["gap"], t["qdrant_max_char_end"], t["source_length"], t["title"][:70],
+                "  gap=%6d (%4.1f%%)  qdrant_max=%7d  src_len=%7d  %s",
+                t["gap"], pct, t["qdrant_max_char_end"], t["source_length"], t["title"][:65],
             )
         if len(truncated) > 5:
             log.warning("  ... and %d more — see truncation_report.json", len(truncated) - 5)
     else:
-        log.info("Truncation check passed: all ingested titles cover their full source text.")
+        log.info("TXT/PDF drift check: all ingested titles cover their full source text.")
     return truncated
 
 

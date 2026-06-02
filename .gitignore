@@ -82,5 +82,9 @@ Thumbs.db
 tests/eval/runs/
 tests/eval/cuad_gold/
 tests/eval/gold/
-tests/eval/*.json
+tests/eval/rrf_cache/
+# Ignore JSON anywhere under tests/ (generated eval/sweep/cache artifacts).
+# Already-tracked curated files (queries*.json, gold.json, doc_scoped_titles.json)
+# stay tracked; this only prevents new JSON from being committed accidentally.
+tests/**/*.json
 tests/eval/gold_debug.csv

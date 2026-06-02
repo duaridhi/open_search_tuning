@@ -130,6 +130,16 @@ class SearchResult(BaseModel):
         default=[],
         description="Indexes of highlighted sentences",
     )
+    matched_keywords: list[str] = Field(
+        default=[],
+        description="Distinct query keywords that matched this chunk (BM42 stem-based). "
+                    "Populated only for sparse_search/hybrid_search; empty otherwise.",
+    )
+    keyword_offsets: list[list[int]] = Field(
+        default=[],
+        description="[start, end] char ranges within `text` for each matched-keyword "
+                    "occurrence. Populated only for sparse_search/hybrid_search.",
+    )
 
 
 class SearchResponse(BaseModel):
@@ -411,6 +421,8 @@ async def search_contracts(
                     source=r.get("source", ["embeddings"]),
                     highlighted_sentences=r.get("highlighted_sentences", []),
                     highlight_sentence_indexes=r.get("highlight_sentence_indexes", []),
+                    matched_keywords=r.get("matched_keywords", []),
+                    keyword_offsets=r.get("keyword_offsets", []),
                 )
             )
         
@@ -657,6 +669,8 @@ async def chat_endpoint(request: ChatRequest, response: Response = None) -> Chat
                     source=r.get("source", ["embeddings"]),
                     highlighted_sentences=r.get("highlighted_sentences", []),
                     highlight_sentence_indexes=r.get("highlight_sentence_indexes", []),
+                    matched_keywords=r.get("matched_keywords", []),
+                    keyword_offsets=r.get("keyword_offsets", []),
                 )
             )
         logger.info(f"Chat answered query '{request.query}' using {len(results)} passages")

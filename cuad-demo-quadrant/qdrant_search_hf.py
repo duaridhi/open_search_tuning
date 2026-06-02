@@ -357,6 +357,99 @@ def highlight_text(query: str, document: str):
 		return {"highlighted_sentences": [], "highlight_sentence_indexes": [], "highlight_offsets": []}
 
 
+# ----------------------------------------------------------------------------
+# Lexical keyword highlighting for sparse / hybrid search.
+#
+# BM42 retrieval matches a query token to a chunk token when their Snowball
+# *stems* collide (see fastembed/sparse/bm42.py: tokenize → reconstruct BPE →
+# drop stopwords/punctuation → stem → hash). We reproduce that same pipeline on
+# the already-loaded sparse encoder to surface which query keywords matched each
+# chunk, with char offsets — faithful to retrieval, no model call, no HF round
+# trip. Empty for semantic_search (no lexical signal) and when sparse isn't loaded.
+# ----------------------------------------------------------------------------
+def _bm42_model():
+	"""The underlying fastembed `Bm42` instance (exposes tokenizer/stemmer/
+	stopwords/punctuation), or None when the sparse encoder isn't loaded."""
+	return getattr(_sparse_encoder, "model", None) if _sparse_available else None
+
+
+def _bm42_words_with_offsets(model, text: str) -> list[tuple[str, str, int, int]]:
+	"""Run `text` through BM42's word pipeline, keeping char offsets.
+
+	Returns (surface, stem, start, end) per content word. Mirrors the Bm42
+	reconstruct-BPE → filter → stem steps, but merges subword char offsets
+	(which `_reconstruct_bpe` discards) so callers can locate each word in `text`.
+	"""
+	encoded = model.tokenizer.encode(text)
+	prefix = model.tokenizer.model.continuing_subword_prefix
+	plen = len(prefix)
+	# Merge WordPiece subwords back into whole words, accumulating offsets.
+	words: list[tuple[str, int, int]] = []
+	acc = ""
+	acc_start = acc_end = 0
+	for token, (start, end) in zip(encoded.tokens, encoded.offsets):
+		if token in model.special_tokens:
+			continue
+		if token.startswith(prefix):
+			acc += token[plen:]
+			acc_end = end
+		else:
+			if acc:
+				words.append((acc, acc_start, acc_end))
+			acc, acc_start, acc_end = token, start, end
+	if acc:
+		words.append((acc, acc_start, acc_end))
+	# Drop stopwords/punctuation, then Snowball-stem each surviving word.
+	result: list[tuple[str, str, int, int]] = []
+	for surface, start, end in words:
+		if surface in model.stopwords or surface in model.punctuation:
+			continue
+		result.append((surface, model.stemmer.stem_word(surface), start, end))
+	return result
+
+
+@lru_cache(maxsize=1024)
+def _query_stem_set(query: str) -> frozenset:
+	"""Distinct Snowball stems of the query's content tokens — the set BM42 would
+	hash and match against. Cached; empty frozenset if sparse isn't loaded."""
+	model = _bm42_model()
+	if model is None:
+		return frozenset()
+	return frozenset(stem for _, stem, _, _ in _bm42_words_with_offsets(model, query))
+
+
+def extract_matched_keywords(query: str, document: str) -> dict:
+	"""Identify which query keywords appear in `document` under BM42 stemming.
+
+	Returns `matched_keywords` (distinct surface terms, first-seen order, original
+	casing) and `keyword_offsets` ([start, end] char ranges in `document` for every
+	occurrence). Never raises — returns empty lists on any failure."""
+	empty = {"matched_keywords": [], "keyword_offsets": []}
+	model = _bm42_model()
+	if model is None:
+		return empty
+	try:
+		with span("keyword_match"):
+			query_stems = _query_stem_set(query)
+			if not query_stems:
+				return empty
+			matched_keywords: list[str] = []
+			keyword_offsets: list[list[int]] = []
+			seen: set[str] = set()
+			for surface, stem, start, end in _bm42_words_with_offsets(model, document):
+				if stem not in query_stems:
+					continue
+				keyword_offsets.append([start, end])
+				term = document[start:end]   # original casing
+				if term.lower() not in seen:
+					seen.add(term.lower())
+					matched_keywords.append(term)
+			return {"matched_keywords": matched_keywords, "keyword_offsets": keyword_offsets}
+	except Exception as e:
+		logger.warning("Keyword match failed: %s", e)
+		return empty
+
+
 def _result_rerank_enabled() -> bool:
 	return RERANK_RESULTS and (RERANK_BACKEND == "hf" or _reranker is not None)
 
@@ -411,6 +504,10 @@ def _assemble_results(
 	which retrieval signals produced the chunk; `strategy` is echoed into metadata."""
 	rerank_on = _result_rerank_enabled()
 	points = _rerank_points(query, raw_points, top_k) if rerank_on else raw_points[:top_k]
+	# Lexical keyword highlighting: only for strategies that use the sparse signal
+	# (sparse_search / hybrid_search both carry "sparse" in `source`). Always on for
+	# those, independent of the `highlight` flag, since it makes no HF call.
+	keyword_match_on = "sparse" in source and _sparse_available
 	results = []
 	for point in points:
 		if point.score < min_score:
@@ -435,6 +532,13 @@ def _assemble_results(
 			page_end = chunk_page_offset_start + chunk_end if chunk_page_offset_start else chunk_end
 			highlight_page_offset_starts.append(page_start)
 			highlight_page_offset_ends.append(page_end)
+		if keyword_match_on:
+			kw = extract_matched_keywords(query, text)
+			matched_keywords = kw["matched_keywords"]
+			keyword_offsets = kw["keyword_offsets"]
+		else:
+			matched_keywords = []
+			keyword_offsets = []
 		results.append(
 			{
 				"id": payload.get("doc_id"),
@@ -451,6 +555,8 @@ def _assemble_results(
 				"source": source,
 				"highlighted_sentences": highlighted_sentences,
 				"highlight_sentence_indexes": highlight_sentence_indexes,
+				"matched_keywords": matched_keywords,
+				"keyword_offsets": keyword_offsets,
 			}
 		)
 	metadata = {

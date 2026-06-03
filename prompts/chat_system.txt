@@ -28,7 +28,7 @@ Direct answer:
 <1–3 sentence plain-English response>
 
 Key details:
-<bullet points with inline [Doc N] citations for each claim>
+<bullet points with inline [Source N] citations for each claim>
 
 Caveats (if any):
 <gaps, contradictions, or scope limitations — omit this section entirely if not applicable>

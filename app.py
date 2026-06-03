@@ -14,6 +14,7 @@ import json
 import os
 import asyncio
 import logging
+import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -589,6 +590,29 @@ async def get_document_detail(
 # Chat Endpoint
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _result_to_search_result(r: dict) -> "SearchResult":
+    hf_path = f"raw/{r['title'].strip()}.pdf"
+    return SearchResult(
+        id=r["id"],
+        score=r["score"],
+        title=r["title"],
+        text=r["text"],
+        page_start=r["page_start"],
+        page_end=r["page_end"],
+        char_start=r["char_start"],
+        char_end=r["char_end"],
+        page_offset_start=r.get("page_offset_start"),
+        page_offset_end=r.get("page_offset_end"),
+        pdf_path=r["pdf_path"],
+        pdf_url=generate_hf_url(hf_path),
+        source=r.get("source", ["embeddings"]),
+        highlighted_sentences=r.get("highlighted_sentences", []),
+        highlight_sentence_indexes=r.get("highlight_sentence_indexes", []),
+        matched_keywords=r.get("matched_keywords", []),
+        keyword_offsets=r.get("keyword_offsets", []),
+    )
+
+
 CHAT_TIMEOUT = int(os.getenv("CHAT_TIMEOUT", "120"))
 CHAT_STREAM_TIMEOUT = int(os.getenv("CHAT_STREAM_TIMEOUT", "120"))
 
@@ -653,31 +677,7 @@ async def chat_endpoint(request: ChatRequest, response: Response = None) -> Chat
                 detail=f"Chat generation timed out after {CHAT_TIMEOUT}s",
             )
 
-        sources = []
-        for r in results:
-            hf_path = f"raw/{r['title'].strip()}.pdf"
-            pdf_url = generate_hf_url(hf_path)
-            sources.append(
-                SearchResult(
-                    id=r["id"],
-                    score=r["score"],
-                    title=r["title"],
-                    text=r["text"],
-                    page_start=r["page_start"],
-                    page_end=r["page_end"],
-                    char_start=r["char_start"],
-                    char_end=r["char_end"],
-                    page_offset_start=r.get("page_offset_start"),
-                    page_offset_end=r.get("page_offset_end"),
-                    pdf_path=r["pdf_path"],
-                    pdf_url=pdf_url,
-                    source=r.get("source", ["embeddings"]),
-                    highlighted_sentences=r.get("highlighted_sentences", []),
-                    highlight_sentence_indexes=r.get("highlight_sentence_indexes", []),
-                    matched_keywords=r.get("matched_keywords", []),
-                    keyword_offsets=r.get("keyword_offsets", []),
-                )
-            )
+        sources = [_result_to_search_result(r) for r in results]
         logger.info(f"Chat answered query '{request.query}' using {len(results)} passages")
         record_span("total", (time.perf_counter() - _t_chat_start) * 1000.0)
         header = spans_header_value()
@@ -698,14 +698,14 @@ async def chat_endpoint(request: ChatRequest, response: Response = None) -> Chat
 
 
 @app.post("/chat/stream", tags=["Chat"])
-async def chat_stream_endpoint(request: ChatRequest) -> StreamingResponse:
+async def chat_stream_endpoint(request: ChatRequest, response: Response = None) -> StreamingResponse:
     """
     Streaming RAG chat over Server-Sent Events (SSE).
 
     Emits three event types in order:
       - ``sources`` — search results used as context (arrives ~2-3 s in)
       - ``token``   — one LLM output token per event
-      - ``done``    — stream complete (or ``error`` on failure)
+      - ``done``    — stream complete (clean completion only; not sent after ``error``)
 
     Each SSE line is: ``data: <json>\\n\\n``
 
@@ -743,43 +743,30 @@ async def chat_stream_endpoint(request: ChatRequest) -> StreamingResponse:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
             return
 
+        # Set the retrieve-span header before streaming starts — HTTP headers
+        # must be written before the first body byte.
+        perf_header = spans_header_value()
+        if perf_header and response is not None:
+            response.headers["X-Perf-Spans"] = perf_header
+
         # Emit sources so the UI can render citations immediately
-        sources = []
-        for r in results:
-            hf_path = f"raw/{r['title'].strip()}.pdf"
-            pdf_url = generate_hf_url(hf_path)
-            sources.append(
-                SearchResult(
-                    id=r["id"],
-                    score=r["score"],
-                    title=r["title"],
-                    text=r["text"],
-                    page_start=r["page_start"],
-                    page_end=r["page_end"],
-                    char_start=r["char_start"],
-                    char_end=r["char_end"],
-                    page_offset_start=r.get("page_offset_start"),
-                    page_offset_end=r.get("page_offset_end"),
-                    pdf_path=r["pdf_path"],
-                    pdf_url=pdf_url,
-                    source=r.get("source", ["embeddings"]),
-                    highlighted_sentences=r.get("highlighted_sentences", []),
-                    highlight_sentence_indexes=r.get("highlight_sentence_indexes", []),
-                    matched_keywords=r.get("matched_keywords", []),
-                    keyword_offsets=r.get("keyword_offsets", []),
-                )
-            )
+        sources = [_result_to_search_result(r) for r in results]
         yield f"data: {json.dumps({'type': 'sources', 'query': request.query, 'sources': [s.model_dump() for s in sources]})}\n\n"
 
         # ── Phase 2: stream LLM tokens ───────────────────────────────────────
         # chat_stream_gen is a blocking sync generator; run it in a thread and
         # bridge tokens to this async generator via a queue.
+        # stop_event lets us signal the thread to stop between tokens so it
+        # doesn't keep consuming the HF stream after the generator exits.
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
+        stop_event = threading.Event()
 
         def _run_sync():
             try:
                 for token in chat_stream_gen(request.query, results, request.system_prompt):
+                    if stop_event.is_set():
+                        break
                     loop.call_soon_threadsafe(queue.put_nowait, token)
             except Exception as exc:
                 loop.call_soon_threadsafe(queue.put_nowait, exc)
@@ -788,15 +775,20 @@ async def chat_stream_endpoint(request: ChatRequest) -> StreamingResponse:
 
         stream_task = asyncio.create_task(asyncio.to_thread(_run_sync))
         deadline = loop.time() + CHAT_STREAM_TIMEOUT
+        clean_exit = False
         try:
             while True:
-                remaining = max(0.5, deadline - loop.time())
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Chat generation timed out'})}\n\n"
+                    break
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=remaining)
                 except asyncio.TimeoutError:
                     yield f"data: {json.dumps({'type': 'error', 'message': 'Chat generation timed out'})}\n\n"
                     break
                 if item is None:
+                    clean_exit = True
                     break
                 if isinstance(item, Exception):
                     logger.error("Chat stream LLM error: %s", item)
@@ -804,11 +796,13 @@ async def chat_stream_endpoint(request: ChatRequest) -> StreamingResponse:
                     break
                 yield f"data: {json.dumps({'type': 'token', 'token': item})}\n\n"
         finally:
+            stop_event.set()
             if not stream_task.done():
                 stream_task.cancel()
 
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-        logger.info("Chat stream completed for query: '%s'", request.query)
+        if clean_exit:
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            logger.info("Chat stream completed for query: '%s'", request.query)
 
     return StreamingResponse(
         event_generator(),

@@ -10,7 +10,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Generator, Optional
 
 from huggingface_hub import InferenceClient
 from dotenv import load_dotenv
@@ -30,6 +30,20 @@ CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.1"))
 
 if not HF_TOKEN:
     raise RuntimeError("HF_TOKEN environment variable must be set for HuggingFace Inference API.")
+
+# Load system prompt from prompts/chat_system.txt (two levels up from this file).
+# Falls back to a minimal inline prompt if the file is missing.
+_PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "chat_system.txt"
+try:
+    DEFAULT_SYSTEM_PROMPT = _PROMPT_FILE.read_text(encoding="utf-8").strip()
+    logger.info("Loaded system prompt from %s", _PROMPT_FILE)
+except FileNotFoundError:
+    DEFAULT_SYSTEM_PROMPT = (
+        "You are a legal contract analysis assistant. "
+        "Synthesize an answer from the contract passages below. "
+        "Cite documents inline as [Source N]. Do not copy passages verbatim."
+    )
+    logger.warning("prompts/chat_system.txt not found; using fallback system prompt")
 
 _inference_client: Optional[InferenceClient] = None
 
@@ -91,12 +105,7 @@ def chat(
     context = _build_context(documents)
 
     if system_prompt is None:
-        system_prompt = (
-            "You are a legal contract analysis assistant. "
-            "Answer the user's question using ONLY the contract passages provided below. "
-            "Cite the document title and sections when referencing specific clauses. "
-            "If the answer cannot be determined from the passages, say so explicitly."
-        )
+        system_prompt = DEFAULT_SYSTEM_PROMPT
 
     user_message = (
         f"Contract passages:\n\n{context}\n\n"
@@ -122,3 +131,46 @@ def chat(
     answer = completion.choices[0].message.content
     logger.info("HuggingFace chat API responded in %.2fs (%d chars)", _elapsed, len(answer))
     return answer
+
+
+def chat_stream(
+    query: str,
+    documents: list[dict],
+    system_prompt: Optional[str] = None,
+) -> Generator[str, None, None]:
+    """
+    Like chat() but yields token strings as they arrive from the HF model.
+    Must be called from a background thread (blocks on network I/O per token).
+    """
+    if not documents:
+        yield "No relevant contract passages were found for your query."
+        return
+
+    context = _build_context(documents)
+
+    if system_prompt is None:
+        system_prompt = DEFAULT_SYSTEM_PROMPT
+
+    user_message = (
+        f"Contract passages:\n\n{context}\n\n"
+        f"Question: {query}"
+    )
+
+    client = _get_inference_client()
+    logger.info("Streaming HuggingFace chat model: %s", CHAT_MODEL)
+
+    with span("chat_completion_stream"):
+        stream = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            max_tokens=CHAT_MAX_TOKENS,
+            temperature=CHAT_TEMPERATURE,
+            stream=True,
+        )
+        for chunk in stream:
+            token = chunk.choices[0].delta.content
+            if token:
+                yield token

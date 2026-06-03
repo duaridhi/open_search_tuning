@@ -10,6 +10,7 @@ Provides REST API endpoints for:
   - /documents/{name} - Get specific document info
 """
 
+import json
 import os
 import asyncio
 import logging
@@ -19,6 +20,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Path, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 # Import Qdrant search and utilities
@@ -38,7 +40,7 @@ from qdrant_search_hf import (
     SEARCH_STRATEGIES,
 )
 from document_utils import get_unique_documents, get_document_info
-from chat_hf import chat
+from chat_hf import chat, chat_stream as chat_stream_gen
 from perf_trace import start_trace, span, spans_header_value, record_span
 from qdrant_cluster_connect import get_cluster_info
 from hf_utils import init_hf_client, generate_hf_url, list_hf_documents
@@ -588,6 +590,7 @@ async def get_document_detail(
 # ─────────────────────────────────────────────────────────────────────────────
 
 CHAT_TIMEOUT = int(os.getenv("CHAT_TIMEOUT", "120"))
+CHAT_STREAM_TIMEOUT = int(os.getenv("CHAT_STREAM_TIMEOUT", "120"))
 
 
 class ChatRequest(BaseModel):
@@ -692,6 +695,129 @@ async def chat_endpoint(request: ChatRequest, response: Response = None) -> Chat
     except Exception as e:
         logger.error(f"Chat failed for query '{request.query}': {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+
+
+@app.post("/chat/stream", tags=["Chat"])
+async def chat_stream_endpoint(request: ChatRequest) -> StreamingResponse:
+    """
+    Streaming RAG chat over Server-Sent Events (SSE).
+
+    Emits three event types in order:
+      - ``sources`` — search results used as context (arrives ~2-3 s in)
+      - ``token``   — one LLM output token per event
+      - ``done``    — stream complete (or ``error`` on failure)
+
+    Each SSE line is: ``data: <json>\\n\\n``
+
+    The frontend should open this with ``fetch`` + a streaming body reader,
+    or ``EventSource`` (GET-only; use fetch for POST).
+    """
+    try:
+        request.strategy = normalize_strategy(request.strategy)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    async def event_generator():
+        start_trace()
+
+        # ── Phase 1: retrieve ────────────────────────────────────────────────
+        try:
+            with span("retrieve"):
+                results, _ = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        search,
+                        request.query,
+                        request.top_k,
+                        request.document_name,
+                        request.strategy,
+                        0.0,
+                        SEARCH_HIGHLIGHT_DEFAULT,
+                    ),
+                    timeout=SEARCH_TIMEOUT,
+                )
+        except asyncio.TimeoutError:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'Search timed out after {SEARCH_TIMEOUT}s'})}\n\n"
+            return
+        except Exception as e:
+            logger.error("Chat stream search failed: %s", e, exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            return
+
+        # Emit sources so the UI can render citations immediately
+        sources = []
+        for r in results:
+            hf_path = f"raw/{r['title'].strip()}.pdf"
+            pdf_url = generate_hf_url(hf_path)
+            sources.append(
+                SearchResult(
+                    id=r["id"],
+                    score=r["score"],
+                    title=r["title"],
+                    text=r["text"],
+                    page_start=r["page_start"],
+                    page_end=r["page_end"],
+                    char_start=r["char_start"],
+                    char_end=r["char_end"],
+                    page_offset_start=r.get("page_offset_start"),
+                    page_offset_end=r.get("page_offset_end"),
+                    pdf_path=r["pdf_path"],
+                    pdf_url=pdf_url,
+                    source=r.get("source", ["embeddings"]),
+                    highlighted_sentences=r.get("highlighted_sentences", []),
+                    highlight_sentence_indexes=r.get("highlight_sentence_indexes", []),
+                    matched_keywords=r.get("matched_keywords", []),
+                    keyword_offsets=r.get("keyword_offsets", []),
+                )
+            )
+        yield f"data: {json.dumps({'type': 'sources', 'query': request.query, 'sources': [s.model_dump() for s in sources]})}\n\n"
+
+        # ── Phase 2: stream LLM tokens ───────────────────────────────────────
+        # chat_stream_gen is a blocking sync generator; run it in a thread and
+        # bridge tokens to this async generator via a queue.
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def _run_sync():
+            try:
+                for token in chat_stream_gen(request.query, results, request.system_prompt):
+                    loop.call_soon_threadsafe(queue.put_nowait, token)
+            except Exception as exc:
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+
+        stream_task = asyncio.create_task(asyncio.to_thread(_run_sync))
+        deadline = loop.time() + CHAT_STREAM_TIMEOUT
+        try:
+            while True:
+                remaining = max(0.5, deadline - loop.time())
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Chat generation timed out'})}\n\n"
+                    break
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    logger.error("Chat stream LLM error: %s", item)
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(item)})}\n\n"
+                    break
+                yield f"data: {json.dumps({'type': 'token', 'token': item})}\n\n"
+        finally:
+            if not stream_task.done():
+                stream_task.cancel()
+
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        logger.info("Chat stream completed for query: '%s'", request.query)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable nginx/proxy buffering
+        },
+    )
 
 
 @app.get("/", tags=["Info"])

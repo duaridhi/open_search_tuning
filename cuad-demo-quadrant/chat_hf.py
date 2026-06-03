@@ -72,7 +72,7 @@ def _build_context(documents: list[dict]) -> str:
             body = " ".join(s.strip() for s in highlights if s.strip())
         else:
             body = (doc.get("text", "") or "").strip()
-        parts.append(f"[Document {i}] Title: {title} (score: {score:.3f})\n{body}")
+        parts.append(f"[Source {i}] Title: {title} (score: {score:.3f})\n{body}")
     return "\n\n---\n\n".join(parts)
 
 

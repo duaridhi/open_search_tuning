@@ -1,0 +1,49 @@
+###############################################################################
+# Copy to terraform.tfvars and edit. terraform.tfvars is gitignored — do NOT
+# commit real secret values. Prefer passing secrets via TF_VAR_* env vars.
+###############################################################################
+
+aws_region   = "us-east-1"
+project_name = "cuad-ai-demo"
+environment  = "demo"
+
+# --- ECR / App Runner image ---------------------------------------------------
+ecr_repo_name       = "cuad-ai-demo"
+apprunner_image_tag = "latest"
+# App Runner valid pairs only. Plan wants 0.5 vCPU (not valid); use 0.25 or 1.
+apprunner_cpu    = "0.25 vCPU"
+apprunner_memory = "1 GB"
+
+# --- Backend runtime config (plain env vars) ----------------------------------
+cluster_url       = "https://REPLACE-ME.us-east-1-0.aws.cloud.qdrant.io:6333"
+qdrant_collection = "cuad_contracts"
+embed_model       = "sentence-transformers/all-MiniLM-L6-v2"
+vector_size       = 384
+rerank_model      = "BAAI/bge-reranker-v2-m3"
+chat_model        = "Qwen/Qwen3-235B-A22B:novita"
+
+# --- SageMaker models (pulled from HF Hub at endpoint creation) ---------------
+embedder_hf_model_id = "sentence-transformers/all-MiniLM-L6-v2"
+reranker_hf_model_id = "BAAI/bge-reranker-v2-m3"
+# Confirmed HF DLC CPU image for us-east-1 (2026-06-10). Override if AWS bumps it.
+# hf_dlc_image_uri = "763104351884.dkr.ecr.us-east-1.amazonaws.com/huggingface-pytorch-inference:2.6.0-transformers4.51.3-cpu-py312-ubuntu22.04"
+
+# --- Frontend -----------------------------------------------------------------
+frontend_bucket_name   = "cuad-ai-demo-fe" # must be globally unique
+cloudfront_price_class = "PriceClass_100"
+
+# --- GitHub Actions OIDC ------------------------------------------------------
+create_github_oidc_provider = true # set false if provider already exists
+github_backend_repo         = "RidhiD/cuad-ai-demo"
+github_frontend_repo        = "RidhiD/cuad-ai-demo-fe"
+github_oidc_branch          = "main"
+
+# --- CloudWatch ---------------------------------------------------------------
+log_retention_days = 14
+# alarm_email = "duaridhi@gmail.com"
+
+# --- Secrets: PREFER env vars over this file ----------------------------------
+# Recommended:  export TF_VAR_hf_token=...  export TF_VAR_qdrant_api_key=...
+# If you must set here, NEVER commit the file:
+# hf_token       = "hf_xxx"
+# qdrant_api_key = "qdr_xxx"

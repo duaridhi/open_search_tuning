@@ -2,7 +2,6 @@
 name: test-runner
 description: Runs the full test suite for this repo — unit AND integration — and reports a clear pass/fail with the failing output. Use before a commit/PR, after any code change to app.py / cuad-demo-quadrant/*, after a model or env swap, and as the verification gate in the AWS-deployment work. Runs pytest unit tests when present, boots the FastAPI app and exercises the live HTTP surface (/health, /search, /config, /chat), runs the eval smoke + perf probes, and checks Qdrant connectivity. It RUNS and REPORTS; it does not edit source to make tests pass.
 tools: Read, Bash, Grep, Glob
-isolation: worktree
 ---
 
 # Role

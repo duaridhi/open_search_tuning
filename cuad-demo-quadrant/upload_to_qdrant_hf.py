@@ -52,6 +52,7 @@ Optional env vars
 """
 
 import logging
+import json
 import os
 import time
 import uuid
@@ -91,7 +92,12 @@ UPLOAD_BATCH_SIZE  = int(os.getenv("UPLOAD_BATCH_SIZE", "100"))
 SKIP_INGESTED_DOCS = os.getenv("SKIP_INGESTED_DOCS", "1").lower() not in ("0", "false", "no")
 ENABLE_HYBRID    = os.getenv("ENABLE_HYBRID", "0").lower() not in ("0", "false", "no")
 SPARSE_MODEL_NAME = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
-EMBED_PROVIDER   = os.getenv("EMBED_PROVIDER", "hf")   # "hf" or "voyageai"
+EMBED_PROVIDER   = os.getenv("EMBED_PROVIDER", "hf").lower()   # hf | voyageai | sagemaker | local
+_VALID_PROVIDERS = ("hf", "voyageai", "sagemaker", "local")
+if EMBED_PROVIDER not in _VALID_PROVIDERS:
+    raise EnvironmentError(f"EMBED_PROVIDER must be one of {_VALID_PROVIDERS}; got {EMBED_PROVIDER!r}")
+AWS_REGION        = os.getenv("AWS_REGION", "us-east-1")
+EMBEDDER_ENDPOINT = os.getenv("EMBEDDER_ENDPOINT", "")   # SageMaker endpoint, when provider=sagemaker
 
 _CUAD_DATA_BASE = Path(
     "/home/ridhi/projects/project1/open_search_tuning"
@@ -103,8 +109,10 @@ HF_TOKEN = os.getenv("HF_TOKEN", "")
 VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY", "")
 if EMBED_PROVIDER == "voyageai" and not VOYAGE_API_KEY:
     raise EnvironmentError("VOYAGE_API_KEY is required when EMBED_PROVIDER=voyageai.")
-if EMBED_PROVIDER != "voyageai" and not HF_TOKEN:
+if EMBED_PROVIDER == "hf" and not HF_TOKEN:
     raise EnvironmentError("HF_TOKEN is required when EMBED_PROVIDER=hf.")
+if EMBED_PROVIDER == "sagemaker" and not EMBEDDER_ENDPOINT:
+    raise EnvironmentError("EMBEDDER_ENDPOINT is required when EMBED_PROVIDER=sagemaker.")
 
 logger.info(
     "Config loaded: COLLECTION=%s  EMBED_MODEL=%s  DOC_OFFSET=%d  DOC_COUNT=%d  MAX_DOCS=%d  "
@@ -163,6 +171,48 @@ def _hf_api_embed(texts: list[str]) -> list:
     return resp.json()
 
 
+_sagemaker_runtime = None
+_local_embedder = None
+
+
+def _sagemaker_embed(texts: list[str]) -> list:
+    """Embed a batch via a SageMaker endpoint hosting EMBED_MODEL. boto3 client is
+    created lazily so importing this module needs no AWS creds unless used."""
+    global _sagemaker_runtime
+    if _sagemaker_runtime is None:
+        import boto3
+        _sagemaker_runtime = boto3.client("sagemaker-runtime", region_name=AWS_REGION)
+    resp = _sagemaker_runtime.invoke_endpoint(
+        EndpointName=EMBEDDER_ENDPOINT, ContentType="application/json",
+        Accept="application/json", Body=json.dumps({"inputs": texts}),
+    )
+    data = json.loads(resp["Body"].read())
+    if isinstance(data, dict):
+        data = data.get("embedding") or data.get("embeddings") or data.get("vectors")
+    return data
+
+
+def _local_embed(texts: list[str]) -> np.ndarray:
+    """Embed a batch with an in-process sentence-transformers model (no API)."""
+    global _local_embedder
+    if _local_embedder is None:
+        from sentence_transformers import SentenceTransformer
+        logger.info("Loading local embedding model: %s", EMBED_MODEL)
+        _local_embedder = SentenceTransformer(EMBED_MODEL)
+    return _local_embedder.encode(list(texts), normalize_embeddings=True)
+
+
+def _embed_batch(texts: list[str]):
+    """Dispatch one batch to the configured EMBED_PROVIDER (hf | voyageai | sagemaker | local)."""
+    if EMBED_PROVIDER == "voyageai":
+        return _voyage_api_embed(texts)
+    if EMBED_PROVIDER == "sagemaker":
+        return _sagemaker_embed(texts)
+    if EMBED_PROVIDER == "local":
+        return _local_embed(texts)
+    return _hf_api_embed(texts)
+
+
 # %% Embedding helper — batched API calls with retry + optional sleep
 
 def _pool(raw) -> np.ndarray:
@@ -199,7 +249,7 @@ def _encode(texts: list[str]) -> np.ndarray:
         batch = texts[i : i + ENCODE_BATCH_SIZE]
         for attempt in range(5):
             try:
-                raw = _voyage_api_embed(batch) if EMBED_PROVIDER == "voyageai" else _hf_api_embed(batch)
+                raw = _embed_batch(batch)
                 break
             except requests.exceptions.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else 0
@@ -239,7 +289,7 @@ if _vector_size_env:
     logger.info("VECTOR_SIZE from env: %d", VECTOR_SIZE)
 else:
     logger.info("VECTOR_SIZE not set — probing model with a test embedding ...")
-    _probe_raw = _voyage_api_embed(["probe"]) if EMBED_PROVIDER == "voyageai" else _hf_api_embed(["probe"])
+    _probe_raw = _embed_batch(["probe"])
     _probe = _pool(_probe_raw)
     VECTOR_SIZE = int(_probe.shape[-1])
     logger.info("Auto-detected VECTOR_SIZE: %d  (output shape: %s)", VECTOR_SIZE, _probe.shape)

@@ -5,6 +5,7 @@ Qdrant search backend using HuggingFace Inference API for embeddings and highlig
 No local embedding service required.
 """
 
+import json
 import logging
 import os
 import re
@@ -79,9 +80,30 @@ SPARSE_MODEL_NAME = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-atte
 RRF_DENSE_WEIGHT = float(os.getenv("RRF_DENSE_WEIGHT") or "0.7")
 RRF_SPARSE_WEIGHT = float(os.getenv("RRF_SPARSE_WEIGHT") or "0.3")
 
-# Backend selection: "hf" (serverless Inference API, production default) | "local"
+# Backend selection (independent for embedding and reranking):
+#   "hf"        — HuggingFace serverless Inference API (production default)
+#   "local"     — sentence-transformers / CrossEncoder weights in-process (offline eval)
+#   "sagemaker" — AWS SageMaker Serverless/Real-time endpoint (see deploy/terraform/)
 EMBED_BACKEND = os.getenv("EMBED_BACKEND", "hf").lower()
 RERANK_BACKEND = os.getenv("RERANK_BACKEND", "hf").lower()
+_VALID_BACKENDS = ("hf", "local", "sagemaker")
+if EMBED_BACKEND not in _VALID_BACKENDS:
+    raise ValueError(f"EMBED_BACKEND must be one of {_VALID_BACKENDS}; got {EMBED_BACKEND!r}")
+if RERANK_BACKEND not in _VALID_BACKENDS:
+    raise ValueError(f"RERANK_BACKEND must be one of {_VALID_BACKENDS}; got {RERANK_BACKEND!r}")
+
+# SageMaker endpoints — only consulted when the matching backend is "sagemaker".
+# Endpoint names are provisioned by deploy/terraform/. The boto3 runtime client is
+# created lazily (see _get_sagemaker_runtime) so importing this module never needs AWS
+# credentials unless a sagemaker backend is actually active.
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+EMBEDDER_ENDPOINT = os.getenv("EMBEDDER_ENDPOINT", "")
+RERANKER_ENDPOINT = os.getenv("RERANKER_ENDPOINT", "")
+if EMBED_BACKEND == "sagemaker" and not EMBEDDER_ENDPOINT:
+    raise ValueError("EMBED_BACKEND=sagemaker requires EMBEDDER_ENDPOINT to be set")
+if RERANK_BACKEND == "sagemaker" and not RERANKER_ENDPOINT:
+    raise ValueError("RERANK_BACKEND=sagemaker requires RERANKER_ENDPOINT to be set")
+_sagemaker_runtime = None   # lazily-created boto3 sagemaker-runtime client
 
 # Result-list reranking (distinct from per-sentence highlighting). Fetch a larger
 # candidate pool from Qdrant (min(top_k * RERANK_POOL, RERANK_FETCH_LIMIT)), score
@@ -112,7 +134,9 @@ _embedder = None   # local SentenceTransformer, only when EMBED_BACKEND="local"
 _dense_available = False   # True once a dense query-embedding path is initialized
 
 if LOAD_DENSE:
-    if EMBED_BACKEND == "hf":
+    if EMBED_BACKEND == "sagemaker":
+        logger.info("Query embedding via SageMaker endpoint: %s (region %s)", EMBEDDER_ENDPOINT, AWS_REGION)
+    elif EMBED_BACKEND == "hf":
         _inference_client = InferenceClient(api_key=HF_TOKEN or None)
         logger.info("Query embedding via HF Inference API: %s", EMBEDDING_MODEL_NAME)
     elif HF_PROVIDER:
@@ -131,7 +155,9 @@ else:
 # Highlight + result-list reranker. In "hf" mode both use the serverless Inference
 # API (text-classification cross-encoder). In "local" mode a CrossEncoder loads.
 _reranker = None   # local CrossEncoder for highlights, only when RERANK_BACKEND="local"
-if RERANK_BACKEND == "hf":
+if RERANK_BACKEND == "sagemaker":
+    logger.info("Reranking via SageMaker endpoint: %s (region %s)", RERANKER_ENDPOINT, AWS_REGION)
+elif RERANK_BACKEND == "hf":
     if _inference_client is None:
         _inference_client = InferenceClient(api_key=HF_TOKEN or None)
     logger.info(
@@ -203,9 +229,87 @@ def _hf_ce_scores_batch(query: str, passages: tuple) -> list[float]:
 	return [float(r[0].score) if r else 0.0 for r in results]
 
 
+def _get_sagemaker_runtime():
+	"""Lazily create the boto3 sagemaker-runtime client. Deferred so importing this
+	module never requires boto3/AWS credentials unless a sagemaker backend is used."""
+	global _sagemaker_runtime
+	if _sagemaker_runtime is None:
+		import boto3
+		_sagemaker_runtime = boto3.client("sagemaker-runtime", region_name=AWS_REGION)
+	return _sagemaker_runtime
+
+
+def _sagemaker_invoke_json(endpoint: str, payload: dict):
+	"""POST a JSON payload to a SageMaker endpoint and parse the JSON response body."""
+	rt = _get_sagemaker_runtime()
+	resp = rt.invoke_endpoint(
+		EndpointName=endpoint, ContentType="application/json",
+		Accept="application/json", Body=json.dumps(payload),
+	)
+	return json.loads(resp["Body"].read())
+
+
+def _sagemaker_embed_query(query: str) -> np.ndarray:
+	"""Embed one query via a SageMaker endpoint hosting EMBEDDING_MODEL_NAME (HF
+	feature-extraction / sentence-transformers container). Returns an L2-normalized
+	float32 vector. Tolerates response shapes: list[float], list[list[float]]
+	(token-level → mean-pool), or {"embedding"|"embeddings"|"vectors": ...}."""
+	data = _sagemaker_invoke_json(EMBEDDER_ENDPOINT, {"inputs": query})
+	if isinstance(data, dict):
+		data = data.get("embedding") or data.get("embeddings") or data.get("vectors")
+	arr = np.asarray(data, dtype=np.float32)
+	if arr.ndim == 2:   # token-level → mean pool
+		arr = arr.mean(axis=0)
+	norm = np.linalg.norm(arr)
+	if norm > 0:
+		arr /= norm
+	return arr
+
+
+def _sagemaker_ce_scores_batch(query: str, passages: tuple) -> list[float]:
+	"""Score (query, passage) pairs via a SageMaker cross-encoder endpoint hosting
+	RERANK_MODEL_ID (HF text-classification container), in one invocation. Assumes the
+	HF inference-toolkit pair contract: {"inputs": [{"text", "text_pair"}, ...]}."""
+	if not passages:
+		return []
+	payload = {"inputs": [{"text": query, "text_pair": p} for p in passages]}
+	results = _sagemaker_invoke_json(RERANKER_ENDPOINT, payload)
+
+	def _score(r):
+		if isinstance(r, list):        # [{label, score}, ...] per input
+			return float(r[0]["score"]) if r else 0.0
+		if isinstance(r, dict):        # {label, score}
+			return float(r.get("score", 0.0))
+		return float(r)                # bare number
+
+	return [_score(r) for r in results]
+
+
+def _score_pairs(query: str, passages) -> list[float]:
+	"""Score (query, passage) pairs with the configured RERANK_BACKEND and return one
+	raw relevance score per passage. Single dispatch point shared by highlight_text
+	(sentence scoring) and _rerank_points (result-list reranking).
+
+	Raw scale by backend: hf/sagemaker return the model's 0–1 score; local returns the
+	CrossEncoder logit. Callers either argsort (scale-agnostic) or apply a sigmoid, so
+	the differing scale is intentional and preserved from the pre-refactor behavior."""
+	passages = tuple(passages)
+	if not passages:
+		return []
+	if RERANK_BACKEND == "hf":
+		return _hf_ce_scores_batch(query, passages)
+	if RERANK_BACKEND == "sagemaker":
+		return _sagemaker_ce_scores_batch(query, passages)
+	return [float(x) for x in _reranker.predict([(query, p) for p in passages], batch_size=32)]
+
+
 @lru_cache(maxsize=1024)
 def _embed_query_cached(query: str) -> tuple[float, ...]:
 	_t0 = time.perf_counter()
+	if EMBED_BACKEND == "sagemaker":
+		vec = _sagemaker_embed_query(query)
+		logger.info("Query embedding (SageMaker): %d-d in %.3fs", len(vec), time.perf_counter() - _t0)
+		return tuple(float(x) for x in vec)
 	if _inference_client is not None and EMBED_BACKEND == "hf":
 		arr = np.asarray(
 			_inference_client.feature_extraction(query, model=EMBEDDING_MODEL_NAME),
@@ -265,24 +369,25 @@ def embed_query(query: str) -> list[float]:
 
 
 def warmup_inference() -> None:
-	"""Fire one cheap embedding + one cheap reranker call to warm the HF serverless
-	endpoints, cutting first-query cold-start. Only meaningful on the HF backend;
-	no-op otherwise. Non-fatal: logs and returns on any failure so it can never
-	block startup. Intended to run in a background thread, gated by WARMUP_ON_START."""
-	if _inference_client is None:
-		logger.info("Warm-up skipped: not on HF Inference backend")
+	"""Fire one cheap embedding + one cheap reranker call to warm the remote (HF
+	serverless or SageMaker) endpoints, cutting first-query cold-start. No-op for
+	local backends. Non-fatal: logs and returns on any failure so it can never block
+	startup. Intended to run in a background thread, gated by WARMUP_ON_START."""
+	remote = {"hf", "sagemaker"}
+	if EMBED_BACKEND not in remote and RERANK_BACKEND not in remote:
+		logger.info("Warm-up skipped: no remote (hf/sagemaker) backend active")
 		return
 	_t0 = time.perf_counter()
-	if EMBED_BACKEND == "hf":
+	if EMBED_BACKEND in remote:
 		try:
-			_inference_client.feature_extraction("warm up", model=EMBEDDING_MODEL_NAME)
-			logger.info("Warm-up: embed endpoint (%s) warmed", EMBEDDING_MODEL_NAME)
+			_embed_query_cached("warm up")
+			logger.info("Warm-up: embed endpoint (%s/%s) warmed", EMBED_BACKEND, EMBEDDING_MODEL_NAME)
 		except Exception as e:
 			logger.warning("Warm-up embed call failed (non-fatal): %s", e)
-	if RERANK_BACKEND == "hf":
+	if RERANK_BACKEND in remote:
 		try:
-			_hf_ce_score("warm up", "warm up passage")
-			logger.info("Warm-up: reranker endpoint (%s) warmed", RERANK_MODEL_ID)
+			_score_pairs("warm up", ("warm up passage",))
+			logger.info("Warm-up: reranker endpoint (%s/%s) warmed", RERANK_BACKEND, RERANK_MODEL_ID)
 		except Exception as e:
 			logger.warning("Warm-up reranker call failed (non-fatal): %s", e)
 	logger.info("Warm-up finished in %.2fs", time.perf_counter() - _t0)
@@ -304,16 +409,12 @@ def highlight_text(query: str, document: str):
 		if not sentences:
 			return {"highlighted_sentences": [], "highlight_sentence_indexes": [], "highlight_offsets": []}
 
-		# Score all sentences against the query with the cross-encoder.
-		# HF backend: bounded-parallel per-pair Inference API calls.
-		# local backend: single batched forward pass.
+		# Score all sentences against the query via the configured RERANK_BACKEND
+		# (hf / sagemaker / local) — see _score_pairs.
 		_reranker_t0 = time.perf_counter()
 		try:
 			with span("rerank"):
-				if RERANK_BACKEND == "hf":
-					raw_scores = _hf_ce_scores_batch(query, tuple(sentences))
-				else:
-					raw_scores = _reranker.predict([(query, s) for s in sentences], batch_size=32)
+				raw_scores = _score_pairs(query, sentences)
 			sentence_scores = (1.0 / (1.0 + np.exp(-np.asarray(raw_scores, dtype=np.float32)))).tolist()
 		except Exception as e:
 			logger.warning("Highlight reranker (%s) failed: %s", RERANK_BACKEND, e)
@@ -464,7 +565,7 @@ def extract_matched_keywords(query: str, document: str) -> dict:
 
 
 def _result_rerank_enabled() -> bool:
-	return RERANK_RESULTS and (RERANK_BACKEND == "hf" or _reranker is not None)
+	return RERANK_RESULTS and (RERANK_BACKEND in ("hf", "sagemaker") or _reranker is not None)
 
 
 def _rerank_fetch_limit(top_k: int) -> int:
@@ -485,10 +586,7 @@ def _rerank_points(query: str, points: list, top_k: int) -> list:
 	try:
 		_t0 = time.perf_counter()
 		with span("result_rerank"):
-			if RERANK_BACKEND == "hf":
-				scores = _hf_ce_scores_batch(query, texts)
-			else:
-				scores = _reranker.predict([(query, t) for t in texts], batch_size=32)
+			scores = _score_pairs(query, texts)
 		logger.info(
 			"Result reranker (%s) scored %d candidates in %.3fs",
 			RERANK_BACKEND, len(texts), time.perf_counter() - _t0,

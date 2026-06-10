@@ -275,10 +275,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Add CORS middleware
+# CORS origins: set ALLOWED_ORIGINS=https://foo.cloudfront.net,https://bar.example.com
+# in production. Falls back to localhost + HF Spaces for local dev.
+_cors_origins_env = os.getenv("ALLOWED_ORIGINS", "")
+_cors_origins = (
+    [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+    if _cors_origins_env
+    else ["http://localhost:5173", "http://localhost:3000", "https://ginntonicfun-cuad-ai-demo.hf.space"]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000","https://ginntonicfun-cuad-ai-demo.hf.space", "*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

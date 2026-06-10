@@ -190,6 +190,19 @@ def _hf_ce_scores_parallel(query: str, passages: tuple) -> list[float]:
 		return list(pool.map(lambda p: _hf_ce_score(query, p), passages))
 
 
+def _hf_ce_scores_batch(query: str, passages: tuple) -> list[float]:
+	"""Score all (query, passage) pairs in a single batched HF Inference API call.
+	Reduces N round-trips to 1 regardless of passage count — preferred over
+	_hf_ce_scores_parallel for SageMaker Serverless where per-invocation overhead
+	dominates latency."""
+	if not passages:
+		return []
+	inputs = [_ce_pair_input(query, p) for p in passages]
+	results = _inference_client.text_classification(inputs, model=RERANK_MODEL_ID)
+	# Batch response: List[List[ClassificationOutput]], one inner list per input.
+	return [float(r[0].score) if r else 0.0 for r in results]
+
+
 @lru_cache(maxsize=1024)
 def _embed_query_cached(query: str) -> tuple[float, ...]:
 	_t0 = time.perf_counter()
@@ -298,7 +311,7 @@ def highlight_text(query: str, document: str):
 		try:
 			with span("rerank"):
 				if RERANK_BACKEND == "hf":
-					raw_scores = _hf_ce_scores_parallel(query, tuple(sentences))
+					raw_scores = _hf_ce_scores_batch(query, tuple(sentences))
 				else:
 					raw_scores = _reranker.predict([(query, s) for s in sentences], batch_size=32)
 			sentence_scores = (1.0 / (1.0 + np.exp(-np.asarray(raw_scores, dtype=np.float32)))).tolist()
@@ -473,7 +486,7 @@ def _rerank_points(query: str, points: list, top_k: int) -> list:
 		_t0 = time.perf_counter()
 		with span("result_rerank"):
 			if RERANK_BACKEND == "hf":
-				scores = _hf_ce_scores_parallel(query, texts)
+				scores = _hf_ce_scores_batch(query, texts)
 			else:
 				scores = _reranker.predict([(query, t) for t in texts], batch_size=32)
 		logger.info(

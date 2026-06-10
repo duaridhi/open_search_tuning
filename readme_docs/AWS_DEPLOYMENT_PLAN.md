@@ -22,13 +22,13 @@ graph TD
         AR[App Runner\ncuad-ai-demo API\nport 8080]
         SM_E[SageMaker Serverless\nEmbedder\nall-MiniLM-L6-v2]
         SM_R[SageMaker Serverless\nReranker\nbge-reranker-v2-m3]
-        SEC[Secrets Manager\nHF_TOKEN · QDRANT_URL\nQDRANT_API_KEY]
+        SEC[SSM Parameter Store\nSecureString\nHF_TOKEN · QDRANT_API_KEY]
         CW[CloudWatch Logs + Alarms]
         ECR[ECR\nDocker Image]
         ECR -->|pull on deploy| AR
         AR -->|embed query| SM_E
         AR -->|rerank sentences| SM_R
-        AR -->|read secrets at startup| SEC
+        AR -->|read SecureString params at startup| SEC
         AR -->|logs| CW
     end
 
@@ -65,7 +65,7 @@ graph TD
 | **LLM (chat)** | HF Inference API free (`Qwen3-235B`) | SageMaker Serverless can't fit 235B; HF free tier sufficient |
 | **Vector DB** | Qdrant Cloud free tier | Already ingested; free tier covers demo corpus |
 | **PDF storage** | HF Hub Dataset | Already there; no migration needed |
-| **Secrets** | Secrets Manager | HF_TOKEN, QDRANT_URL, QDRANT_API_KEY |
+| **Secrets** | SSM Parameter Store (SecureString) | HF_TOKEN, QDRANT_API_KEY. $0 vs Secrets Manager's $1.20/mo; encrypted with the AWS-managed `aws/ssm` KMS key. QDRANT_URL is not a secret — set as a plain env var. |
 | **Logs** | CloudWatch Logs | Included with App Runner |
 | **Registry** | ECR | Required for App Runner |
 
@@ -110,12 +110,12 @@ allow_origins=["https://<cloudfront-id>.cloudfront.net"]
 | Qdrant Cloud | $0 |
 | HF Inference API (LLM) | $0 |
 | ECR (~1.5 GB image) | ~$0.15 |
-| Secrets Manager (3 secrets) | ~$1.20 |
+| SSM Parameter Store (Standard SecureString, 2 params) | $0.00 |
 | CloudWatch Logs | ~$0.25 |
 | Data transfer out | ~$0.10 |
-| **Backend subtotal** | **~$2–3** |
+| **Backend subtotal** | **~$1–2** |
 
-### **Total: ~$2–3 / month**
+### **Total: ~$1–2 / month**
 
 ---
 
@@ -246,25 +246,29 @@ Revert time: ~2 min
 | App Runner warm | $0.04 | +$0.13 |
 | Reranker real-time endpoint | $0.42 | +$2.30 |
 | Frontend (S3 + CloudFront) | $0 | $0 |
-| Everything else | ~$1.70 | no change |
-| **Total** | **~$2–3/mo** | **+~$2.50** |
+| Everything else | ~$0.50 | no change |
+| **Total** | **~$1–2/mo** | **+~$2.50** |
 
 ---
 
 ## Environment Variables
 
-### App Runner (backend) — stored in Secrets Manager
+### App Runner (backend) — secrets in SSM Parameter Store (SecureString)
 
-| Secret name | Env var | Notes |
+| Parameter name | Env var | Notes |
 |---|---|---|
-| `cuad/hf-token` | `HF_TOKEN` | HF Inference + Hub access |
-| `cuad/qdrant-url` | `CLUSTER_URL` | Qdrant Cloud cluster URL |
-| `cuad/qdrant-api-key` | `QDRANT_API_KEY` | Qdrant Cloud API key |
+| `/cuad/hf-token` | `HF_TOKEN` | HF Inference + Hub access |
+| `/cuad/qdrant-api-key` | `QDRANT_API_KEY` | Qdrant Cloud API key |
+
+Both are `SecureString` parameters encrypted with the AWS-managed `aws/ssm` key. App Runner
+injects them as env vars via `RuntimeEnvironmentSecrets` (referencing the SSM parameter ARNs);
+no app code change. The App Runner **instance role** needs `ssm:GetParameters` + `kms:Decrypt`.
 
 ### App Runner (backend) — non-secret, set in service config
 
 | Env var | Value |
 |---|---|
+| `CLUSTER_URL` | `https://<cluster-id>.us-east-1-0.aws.cloud.qdrant.io:6333` (Qdrant Cloud URL — not a secret) |
 | `QDRANT_COLLECTION` | `cuad_contracts` |
 | `EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` |
 | `VECTOR_SIZE` | `384` |
@@ -313,6 +317,7 @@ push to main
 | SageMaker model packaging | Pull from HF Hub at endpoint creation | Simpler; acceptable cold start for demo |
 | Reranker batching | ✅ Done — `_hf_ce_scores_batch` | See code changes below |
 | CORS | ✅ Done — `ALLOWED_ORIGINS` env var | No wildcard; set CloudFront domain on deploy |
+| Secrets store | SSM Parameter Store (SecureString) | $0 vs Secrets Manager ~$1.20/mo; AWS-managed `aws/ssm` key; instance role grants `ssm:GetParameters` + `kms:Decrypt`. Trade-off: no built-in rotation (manual), which we don't use. |
 
 ## Code Changes Made
 

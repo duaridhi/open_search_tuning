@@ -113,7 +113,7 @@ _dense_available = False   # True once a dense query-embedding path is initializ
 
 if LOAD_DENSE:
     if EMBED_BACKEND == "hf":
-        _inference_client = InferenceClient(api_key=HF_TOKEN or None)
+        _inference_client = InferenceClient(api_key=HF_TOKEN or None, provider="hf-inference")
         logger.info("Query embedding via HF Inference API: %s", EMBEDDING_MODEL_NAME)
     elif HF_PROVIDER:
         _hf_embed_url = f"https://router.huggingface.co/{HF_PROVIDER}/models/{EMBEDDING_MODEL_NAME}/pipeline/feature-extraction"
@@ -133,7 +133,7 @@ else:
 _reranker = None   # local CrossEncoder for highlights, only when RERANK_BACKEND="local"
 if RERANK_BACKEND == "hf":
     if _inference_client is None:
-        _inference_client = InferenceClient(api_key=HF_TOKEN or None)
+        _inference_client = InferenceClient(api_key=HF_TOKEN or None, provider="hf-inference")
     logger.info(
         "Reranking via HF Inference API: %s (highlight) / %s (result-list)",
         RERANKER_MODEL_ID, RERANK_MODEL_ID,

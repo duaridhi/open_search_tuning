@@ -143,6 +143,10 @@ class SearchResult(BaseModel):
         description="[start, end] char ranges within `text` for each matched-keyword "
                     "occurrence. Populated only for sparse_search/hybrid_search.",
     )
+    document_result_count: int = Field(
+        default=1,
+        description="Number of chunks from this document present in the current result set.",
+    )
 
 
 class SearchResponse(BaseModel):
@@ -153,6 +157,10 @@ class SearchResponse(BaseModel):
     strategy: str = Field(..., description="Search strategy used")
     results_count: int = Field(..., description="Actual number of results")
     results: list[SearchResult] = Field(..., description="Search results")
+    hits_by_document: dict[str, int] = Field(
+        default={},
+        description="Number of result chunks per document title in this result set.",
+    )
 
 
 class DocumentMetadata(BaseModel):
@@ -407,13 +415,17 @@ async def search_contracts(
                 detail=f"Search operation timed out after {SEARCH_TIMEOUT}s",
             )
 
+        # Count how many result chunks come from each document title
+        from collections import Counter
+        hits_by_document: dict[str, int] = Counter(r["title"] for r in results)
+
         # Convert to SearchResult objects with HuggingFace Hub URLs
         search_results = []
         for r in results:
             # Generate HF Hub URL: format is "raw/{title}.pdf"
             hf_path = f"raw/{r['title'].strip()}.pdf"
             pdf_url = generate_hf_url(hf_path)
-            
+
             search_results.append(
                 SearchResult(
                     id=r["id"],
@@ -433,9 +445,10 @@ async def search_contracts(
                     highlight_sentence_indexes=r.get("highlight_sentence_indexes", []),
                     matched_keywords=r.get("matched_keywords", []),
                     keyword_offsets=r.get("keyword_offsets", []),
+                    document_result_count=hits_by_document[r["title"]],
                 )
             )
-        
+
         logger.info(f"Search query '{q}' returned {len(search_results)} results with strategy '{strategy}'")
         header = spans_header_value()
         if header and response is not None:
@@ -446,6 +459,7 @@ async def search_contracts(
             strategy=strategy,
             results_count=len(search_results),
             results=search_results,
+            hits_by_document=dict(hits_by_document),
         )
 
     except HTTPException:
@@ -597,7 +611,7 @@ async def get_document_detail(
 # Chat Endpoint
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _result_to_search_result(r: dict) -> "SearchResult":
+def _result_to_search_result(r: dict, document_result_count: int = 1) -> "SearchResult":
     hf_path = f"raw/{r['title'].strip()}.pdf"
     return SearchResult(
         id=r["id"],
@@ -617,6 +631,7 @@ def _result_to_search_result(r: dict) -> "SearchResult":
         highlight_sentence_indexes=r.get("highlight_sentence_indexes", []),
         matched_keywords=r.get("matched_keywords", []),
         keyword_offsets=r.get("keyword_offsets", []),
+        document_result_count=document_result_count,
     )
 
 
@@ -684,7 +699,9 @@ async def chat_endpoint(request: ChatRequest, response: Response = None) -> Chat
                 detail=f"Chat generation timed out after {CHAT_TIMEOUT}s",
             )
 
-        sources = [_result_to_search_result(r) for r in results]
+        from collections import Counter
+        chat_hits_by_doc: dict[str, int] = Counter(r["title"] for r in results)
+        sources = [_result_to_search_result(r, document_result_count=chat_hits_by_doc[r["title"]]) for r in results]
         logger.info(f"Chat answered query '{request.query}' using {len(results)} passages")
         record_span("total", (time.perf_counter() - _t_chat_start) * 1000.0)
         header = spans_header_value()
@@ -757,7 +774,9 @@ async def chat_stream_endpoint(request: ChatRequest, response: Response = None) 
             response.headers["X-Perf-Spans"] = perf_header
 
         # Emit sources so the UI can render citations immediately
-        sources = [_result_to_search_result(r) for r in results]
+        from collections import Counter
+        stream_hits_by_doc: dict[str, int] = Counter(r["title"] for r in results)
+        sources = [_result_to_search_result(r, document_result_count=stream_hits_by_doc[r["title"]]) for r in results]
         yield f"data: {json.dumps({'type': 'sources', 'query': request.query, 'sources': [s.model_dump() for s in sources]})}\n\n"
 
         # ── Phase 2: stream LLM tokens ───────────────────────────────────────

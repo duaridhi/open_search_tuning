@@ -90,10 +90,10 @@ RERANK_BACKEND = os.getenv("RERANK_BACKEND", "hf").lower()
 RERANK_RESULTS = os.getenv("RERANK_RESULTS", "1").lower() not in ("0", "false", "no")
 RERANK_MODEL_ID = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 RERANK_POOL = max(1, int(os.getenv("RERANK_POOL", "5")))
-# Pool cap. Each pool candidate is one HF reranker HTTPS call, so this is the main
-# latency knob: 60 trades a little recall (fewer deep candidates reranked) for
-# ~40% fewer rerank calls vs 100. Raise back to 100 via env if recall matters more.
-RERANK_FETCH_LIMIT = max(1, int(os.getenv("RERANK_FETCH_LIMIT", "60")))
+# Pool cap. With batched reranking (one HF call for the whole pool), this controls
+# batch size / recall rather than round-trip count. 100 is the natural uncapped value
+# (top_k=20 × RERANK_POOL=5); raise further via env if you want deeper recall.
+RERANK_FETCH_LIMIT = max(1, int(os.getenv("RERANK_FETCH_LIMIT", "100")))
 # Bounded concurrency for the HF per-pair rerank calls (huggingface_hub has no
 # native batch route; we parallelize instead of running calls strictly serially).
 RERANK_HF_WORKERS = max(1, int(os.getenv("RERANK_HF_WORKERS", "16")))
@@ -194,13 +194,21 @@ def _hf_ce_scores_batch(query: str, passages: tuple) -> list[float]:
 	"""Score all (query, passage) pairs in a single batched HF Inference API call.
 	Reduces N round-trips to 1 regardless of passage count — preferred over
 	_hf_ce_scores_parallel for SageMaker Serverless where per-invocation overhead
-	dominates latency."""
+	dominates latency.
+
+	TextClassificationOutputElement is a dict subclass; access score via .score /
+	["score"], NOT [0] (which raises KeyError because 0 is not a dict key)."""
 	if not passages:
 		return []
 	inputs = [_ce_pair_input(query, p) for p in passages]
 	results = _inference_client.text_classification(inputs, model=RERANK_MODEL_ID)
-	# Batch response: List[List[ClassificationOutput]], one inner list per input.
-	return [float(r[0].score) if r else 0.0 for r in results]
+	# Flat batch response: one TextClassificationOutputElement per input.
+	if len(results) != len(inputs):
+		raise ValueError(
+			f"Batch reranker returned {len(results)} scores for {len(inputs)} inputs; "
+			"falling back to retrieval order"
+		)
+	return [float(r.score) if r else 0.0 for r in results]
 
 
 @lru_cache(maxsize=1024)
